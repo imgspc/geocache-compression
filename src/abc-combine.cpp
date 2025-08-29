@@ -45,6 +45,10 @@
 #include <Alembic/AbcCoreFactory/All.h>
 #include <Alembic/AbcCoreOgawa/All.h>
 
+#include <fstream>
+#include <istream>
+#include <ostream>
+
 typedef Alembic::AbcCoreFactory::IFactory IFactoryNS;
 
 enum ArgMode {
@@ -57,10 +61,7 @@ enum ArgMode {
 
 class ConversionOptions {
 public:
-  ConversionOptions() {
-    toType = IFactoryNS::kUnknown;
-    force = false;
-  }
+  ConversionOptions() : verbose(false) {}
 
   // path to the input file, or blank for stdin.
   std::string inFile;
@@ -71,6 +72,9 @@ public:
   // map of component path -> binary filename path
   std::map<std::string, std::string> inProperties;
 
+  // switch on verbose output (default off)
+  bool verbose;
+
   // Return the file path to read as a binary file for the channel,
   // or an empty string if we should just copy the source file.
   std::string getPropertyFile(const std::string &path) const {
@@ -78,7 +82,7 @@ public:
     if (it == inProperties.end()) {
       return "";
     } else {
-      return *it;
+      return it->second;
     }
   }
 };
@@ -112,15 +116,21 @@ void copyProps(Alembic::Abc::ICompoundProperty &iRead,
         std::ifstream binaryFile(binaryFilePath,
                                  std::ios::in | std::ios::binary);
 
-        auto dimensions = header.getDimensions();
-        char *buffer = new char[bytesPerDatum];
         for (std::size_t j = 0; j < numSamples; ++j) {
-          Alembic::AbcCoreAbstract::ArraySample samp(buffer, dataType,
-                                                     dimensions);
-          binaryFile.read(buffer, bytesPerDatum);
-          outProp.set(samp)
+          // Somewhat silly: get the sample from the input file and clobber it
+          // with the data from the binary file.
+          // This is the easiest way to get the precise number of bytes. If we
+          // cared about performance we could do much better, but we don't.
+          Alembic::AbcCoreAbstract::ArraySamplePtr samp;
+          Alembic::Abc::ISampleSelector sel((Alembic::Abc::index_t)j);
+          inProp.get(samp, sel);
+
+          size_t nBytes = samp->size() * samp->getDataType().getNumBytes();
+          binaryFile.read(
+              static_cast<char *>(const_cast<void *>(samp->getData())), nBytes);
+
+          outProp.set(*samp);
         }
-        delete[] buffer;
       } else {
         if (options.verbose) {
           std::cerr << "Copying " << childPath << std::endl;
@@ -170,8 +180,10 @@ void copyProps(Alembic::Abc::ICompoundProperty &iRead,
         Alembic::AbcCoreAbstract::ScalarSample samp(dataType);
         for (std::size_t j = 0; j < numSamples; ++j) {
           // read straight into the sample buffer, skip the copy
-          binaryFile.read(const_cast<void *>(samp.getData()), bytesPerDatum);
-          outProp.set(samp)
+          binaryFile.read(
+              static_cast<char *>(const_cast<void *>(samp.getData())),
+              bytesPerDatum);
+          outProp.set(samp.getData());
         }
       } else {
         if (options.verbose) {
@@ -210,7 +222,7 @@ void copyObject(Alembic::Abc::IObject &iIn, Alembic::Abc::OObject &iOut,
 
   Alembic::Abc::ICompoundProperty inProps = iIn.getProperties();
   Alembic::Abc::OCompoundProperty outProps = iOut.getProperties();
-  copyProps(inProps, outProps);
+  copyProps(inProps, outProps, options, path);
 
   // We aren't using a leading '/' at the root of the object tree.
   std::string pathPrefix = (path == "") ? "" : (path + "/");
@@ -239,8 +251,8 @@ void displayHelp() {
       << "  --property or -p path/to//component file.bin    the binary file "
          "and component to replace. The double-/ separates the object "
          "hierarchy from the component hierarchy\n"
-      << "  --verbose or -v   print verbose output to stderr\n";
-  << "  --help or -h      print this help message to stderr\n";
+      << "  --verbose or -v   print verbose output to stderr\n"
+      << "  --help or -h      print this help message to stderr\n";
 }
 
 bool parseArgs(int iArgc, char *iArgv[], ConversionOptions &oOptions,
@@ -329,19 +341,19 @@ int main(int argc, char *argv[]) {
     // same Ogawa-format data. Ask no questions.
     std::vector<std::istream *> instreams;
     instreams.push_back(&std::cin);
-    CoreType coreType;
-    archive = factory.getArchive(instreams, coreType);
+    Alembic::AbcCoreFactory::IFactory::CoreType _;
+    archive = factory.getArchive(instreams, _);
   }
 
   Alembic::Abc::IObject inTop = archive.getTop();
 
   Alembic::Abc::ArchiveWriterPtr archiveWriter;
   if (options.outFile != "") {
-    archiveWriter = Alembic::AbcCoreOgawa::WriteArchive(options.outFile,
-                                                        inTop.getMetaData());
+    archiveWriter = Alembic::AbcCoreOgawa::WriteArchive()(options.outFile,
+                                                          inTop.getMetaData());
   } else {
     archiveWriter =
-        Alembic::AbcCoreOgawa::WriteArchive(&std::cout, inTop.getMetaData());
+        Alembic::AbcCoreOgawa::WriteArchive()(&std::cout, inTop.getMetaData());
   }
   Alembic::Abc::OArchive outArchive(archiveWriter);
 

@@ -17,10 +17,14 @@ INCLUDE("cmake/AlembicIlmBase.cmake")
 
 FIND_PACKAGE(Alembic REQUIRED)
 
-ADD_EXECUTABLE(abc-info alembic-to-flat.cpp)
-TARGET_LINK_LIBRARIES(abc-info ${ALEMBIC_LIB} Imath::ImathConfig)
-target_include_directories(abc-info PRIVATE ${ALEMBIC_INCLUDE_DIR})
+ADD_EXECUTABLE(abc-parse abc-parse.cpp)
+TARGET_LINK_LIBRARIES(abc-parse ${ALEMBIC_LIB} Imath::ImathConfig)
+target_include_directories(abc-parse PRIVATE ${ALEMBIC_INCLUDE_DIR})
 
 ADD_EXECUTABLE(abc-separate abc-separate.cpp)
 TARGET_LINK_LIBRARIES(abc-separate ${ALEMBIC_LIB} Imath::ImathConfig)
 target_include_directories(abc-separate PRIVATE ${ALEMBIC_INCLUDE_DIR})
+
+ADD_EXECUTABLE(abc-combine abc-combine.cpp)
+TARGET_LINK_LIBRARIES(abc-combine ${ALEMBIC_LIB} Imath::ImathConfig)
+target_include_directories(abc-combine PRIVATE ${ALEMBIC_INCLUDE_DIR})
