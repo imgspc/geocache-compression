@@ -96,51 +96,50 @@ void copyProps(Alembic::Abc::ICompoundProperty &iRead,
         iRead.getPropertyHeader(i);
     std::string childPath = path + '/' + header.getName();
 
+    // If it's a compound we need to deal with it immediately before we use
+    // functions below that require being either array or scalar.
+    if (header.isCompound()) {
+      Alembic::Abc::OCompoundProperty outProp(iWrite, header.getName(),
+                                              header.getMetaData());
+      Alembic::Abc::ICompoundProperty inProp(iRead, header.getName());
+      copyProps(inProp, outProp, options, childPath);
+      return;
+    }
+
     auto dataType = header.getDataType();
     size_t bytesPerDatum = dataType.getNumBytes();
+    std::string binaryFilePath = options.getPropertyFile(childPath);
+    std::ifstream binaryFile;
+    bool shouldReplace = binaryFilePath != "";
+
+    if (shouldReplace) {
+      if (options.verbose) {
+        std::cerr << "Replacing " << childPath << " with " << binaryFilePath
+                  << std::endl;
+      }
+      binaryFile.open(binaryFilePath, std::ios::in | std::ios::binary);
+    } else {
+      if (options.verbose) {
+        std::cerr << "Copying " << childPath << std::endl;
+      }
+    }
 
     if (header.isArray()) {
       Alembic::Abc::IArrayProperty inProp(iRead, header.getName());
       Alembic::Abc::OArrayProperty outProp(iWrite, header.getName(), dataType,
                                            header.getMetaData(),
                                            header.getTimeSampling());
-
-      std::size_t numSamples = inProp.getNumSamples();
-
-      std::string binaryFilePath = options.getPropertyFile(childPath);
-      if (binaryFilePath != "") {
-        if (options.verbose) {
-          std::cerr << "Replacing " << childPath << " with " << binaryFilePath
-                    << std::endl;
-        }
-        std::ifstream binaryFile(binaryFilePath,
-                                 std::ios::in | std::ios::binary);
-
-        for (std::size_t j = 0; j < numSamples; ++j) {
-          // Somewhat silly: get the sample from the input file and clobber it
-          // with the data from the binary file.
-          // This is the easiest way to get the precise number of bytes. If we
-          // cared about performance we could do much better, but we don't.
-          Alembic::AbcCoreAbstract::ArraySamplePtr samp;
-          Alembic::Abc::ISampleSelector sel((Alembic::Abc::index_t)j);
-          inProp.get(samp, sel);
-
-          size_t nBytes = samp->size() * samp->getDataType().getNumBytes();
+      size_t numSamples = inProp.getNumSamples();
+      for (std::size_t j = 0; j < numSamples; ++j) {
+        Alembic::AbcCoreAbstract::ArraySamplePtr samp;
+        Alembic::Abc::ISampleSelector sel((Alembic::Abc::index_t)j);
+        inProp.get(samp, sel);
+        if (shouldReplace) {
+          size_t nBytes = samp->size() * bytesPerDatum;
           binaryFile.read(
               static_cast<char *>(const_cast<void *>(samp->getData())), nBytes);
-
-          outProp.set(*samp);
         }
-      } else {
-        if (options.verbose) {
-          std::cerr << "Copying " << childPath << std::endl;
-        }
-        for (std::size_t j = 0; j < numSamples; ++j) {
-          Alembic::AbcCoreAbstract::ArraySamplePtr samp;
-          Alembic::Abc::ISampleSelector sel((Alembic::Abc::index_t)j);
-          inProp.get(samp, sel);
-          outProp.set(*samp);
-        }
+        outProp.set(*samp);
       }
     } else if (header.isScalar()) {
       Alembic::Abc::IScalarProperty inProp(iRead, header.getName());
@@ -148,7 +147,6 @@ void copyProps(Alembic::Abc::ICompoundProperty &iRead,
           iWrite, header.getName(), header.getDataType(), header.getMetaData(),
           header.getTimeSampling());
 
-      std::size_t numSamples = inProp.getNumSamples();
       std::vector<std::string> sampStrVec;
       std::vector<std::wstring> sampWStrVec;
       if (header.getDataType().getPod() ==
@@ -159,59 +157,27 @@ void copyProps(Alembic::Abc::ICompoundProperty &iRead,
         sampWStrVec.resize(header.getDataType().getExtent());
       }
 
-      std::string binaryFilePath = options.getPropertyFile(childPath);
-      if (binaryFilePath != "") {
-        if (options.verbose) {
-          std::cerr << "Replacing " << childPath << " with " << binaryFilePath
-                    << std::endl;
-        }
-        std::ifstream binaryFile(binaryFilePath,
-                                 std::ios::in | std::ios::binary);
+      size_t numSamples = inProp.getNumSamples();
+      for (std::size_t j = 0; j < numSamples; ++j) {
+        Alembic::Abc::ISampleSelector sel((Alembic::Abc::index_t)j);
 
         if (header.getDataType().getPod() ==
-                Alembic::AbcCoreAbstract::kStringPOD ||
-            header.getDataType().getPod() ==
-                Alembic::AbcCoreAbstract::kWstringPOD) {
-          std::cerr << "ERROR: property " << childPath
-                    << " is a string property and can't be replaced\n";
-          exit(1);
-        }
-
-        Alembic::AbcCoreAbstract::ScalarSample samp(dataType);
-        for (std::size_t j = 0; j < numSamples; ++j) {
-          // read straight into the sample buffer, skip the copy
-          binaryFile.read(
-              static_cast<char *>(const_cast<void *>(samp.getData())),
-              bytesPerDatum);
-          outProp.set(samp.getData());
-        }
-      } else {
-        if (options.verbose) {
-          std::cerr << "Copying " << childPath << std::endl;
-        }
-        for (std::size_t j = 0; j < numSamples; ++j) {
-          Alembic::Abc::ISampleSelector sel((Alembic::Abc::index_t)j);
-
-          if (header.getDataType().getPod() ==
-              Alembic::AbcCoreAbstract::kStringPOD) {
-            inProp.get(&sampStrVec.front(), sel);
-            outProp.set(&sampStrVec.front());
-          } else if (header.getDataType().getPod() ==
-                     Alembic::AbcCoreAbstract::kWstringPOD) {
-            inProp.get(&sampWStrVec.front(), sel);
-            outProp.set(&sampWStrVec.front());
-          } else {
-            char samp[4096]; // max extent * max POD size is 255 * 8
-            inProp.get(samp, sel);
-            outProp.set(samp);
+            Alembic::AbcCoreAbstract::kStringPOD) {
+          inProp.get(&sampStrVec.front(), sel);
+          outProp.set(&sampStrVec.front());
+        } else if (header.getDataType().getPod() ==
+                   Alembic::AbcCoreAbstract::kWstringPOD) {
+          inProp.get(&sampWStrVec.front(), sel);
+          outProp.set(&sampWStrVec.front());
+        } else {
+          char samp[4096]; // max extent * max POD size is 255 * 8
+          inProp.get(samp, sel);
+          if (shouldReplace) {
+            binaryFile.read(samp, bytesPerDatum);
           }
+          outProp.set(samp);
         }
       }
-    } else if (header.isCompound()) {
-      Alembic::Abc::OCompoundProperty outProp(iWrite, header.getName(),
-                                              header.getMetaData());
-      Alembic::Abc::ICompoundProperty inProp(iRead, header.getName());
-      copyProps(inProp, outProp, options, childPath);
     }
   }
 }
@@ -222,7 +188,7 @@ void copyObject(Alembic::Abc::IObject &iIn, Alembic::Abc::OObject &iOut,
 
   Alembic::Abc::ICompoundProperty inProps = iIn.getProperties();
   Alembic::Abc::OCompoundProperty outProps = iOut.getProperties();
-  copyProps(inProps, outProps, options, path);
+  copyProps(inProps, outProps, options, path + "/");
 
   // We aren't using a leading '/' at the root of the object tree.
   std::string pathPrefix = (path == "") ? "" : (path + "/");
