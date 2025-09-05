@@ -40,4 +40,5 @@ set_target_properties(abc-combine PROPERTIES
 
 
 INSTALL(TARGETS abc-parse abc-separate abc-combine)
-INSTALL(PROGRAMS abc-separate.py TYPE BIN)
+INSTALL(PROGRAMS abc-separate.py abc-combine.py
+        TYPE BIN)
