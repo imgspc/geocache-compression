@@ -26,6 +26,9 @@ using Alembic::AbcCoreAbstract::CompoundPropertyReaderPtr;
 using Alembic::AbcCoreAbstract::ScalarPropertyReaderPtr;
 using Alembic::AbcCoreFactory::IFactory;
 
+
+static bool verbose = false;
+
 static BasePropertyReaderPtr find_property(CompoundPropertyReaderPtr prop, const std::string& name);
 static BasePropertyReaderPtr find_property(BasePropertyReaderPtr prop, const std::string& name);
 
@@ -49,7 +52,7 @@ static BasePropertyReaderPtr find_property(CompoundPropertyReaderPtr prop, const
 
     BasePropertyReaderPtr child = prop->getProperty(parts.first);
     if (!child) { 
-        std::cout << name << " not found in property " << prop->getName() << " of object " << prop->getObject()->getName() << std::endl;
+        std::cerr << name << " not found in property " << prop->getName() << " of object " << prop->getObject()->getName() << std::endl;
         return nullptr;
     }
 
@@ -87,14 +90,14 @@ static BasePropertyReaderPtr find_property(ObjectReaderPtr obj, const std::strin
     if (parts.first == "") {
         BasePropertyReaderPtr prop = obj->getProperties();
         if (!prop) {
-            std::cout << name << " not found in object " << obj->getName() << std::endl;
+            std::cerr << name << " not found in object " << obj->getName() << std::endl;
             return nullptr;
         }
         return find_property(prop, parts.second);
     } else {
         ObjectReaderPtr child = obj->getChild(parts.first);
         if (!child) {
-            std::cout << name << " not found in object " << obj->getName() << std::endl;
+            std::cerr << name << " not found in object " << obj->getName() << std::endl;
             return nullptr;
         }
         return find_property(child, parts.second);
@@ -112,9 +115,11 @@ static bool write_property(ScalarPropertyReaderPtr prop, std::ofstream& out)
 
     size_t bytesPerDatum = dataType.getNumBytes();
 
-    std::cout << "writing " << prop->getNumSamples() << " samples, "
-        << (size_t)dataType.getExtent() << " x " << PODName(dataType.getPod())
-        << " (" << bytesPerDatum << " bytes) per sample\n";
+    if (verbose) {
+        std::cout << "writing " << prop->getNumSamples() << " samples, "
+            << (size_t)dataType.getExtent() << " x " << PODName(dataType.getPod())
+            << " (" << bytesPerDatum << " bytes) per sample\n";
+    }
 
     char *buffer = new char[bytesPerDatum];
     for(size_t i = 0, n = prop->getNumSamples(); i < n; ++i) {
@@ -141,9 +146,11 @@ static bool write_property(ArrayPropertyReaderPtr prop, std::ofstream& out)
     if (prop->isConstant()) {
         n = 1;
     }
-    std::cout << "writing " << n << " array samples, " 
-        << (size_t)dataType.getExtent() << " x " << PODName(pod)
-        << " (" << bytesPerDatum << " bytes) per item\n";
+    if (verbose) {
+        std::cout << "writing " << n << " array samples, " 
+            << (size_t)dataType.getExtent() << " x " << PODName(pod)
+            << " (" << bytesPerDatum << " bytes) per item\n";
+    }
 
     // Verify consistent rank/dimension. Otherwise we're cooked.
     std::set<uint64_t> ranks;
@@ -210,7 +217,6 @@ static bool write_property(BasePropertyReaderPtr prop, const std::string& filena
 
 int main(int argc, const char * const *argv)
 {
-    bool verbose = false;
     std::vector<std::string> values;
 
     for(int i = 1; i < argc; ++i)
@@ -218,12 +224,13 @@ int main(int argc, const char * const *argv)
         std::string str = argv[i];
         if (str == "-v" || str == "--verbose") {
             verbose = true;
+        } else {
+            values.push_back(str);
         }
-        values.push_back(str);
     }
 
     if (values.size() != 3) {
-        std::cerr << "arguments: alembic-to-flat [-v|--verbose] input.abc property.path output.bin\n";
+        std::cerr << "arguments: alembic-to-flat [-v|--verbose] input.abc /object//property output.bin\n";
         std::cerr << "\n";
         std::cerr << "Reads the property (specified by path) from input.abc, dumps the samples to the output.bin file\n";
         return 1;
@@ -231,6 +238,15 @@ int main(int argc, const char * const *argv)
     std::string input_filename = values[0];
     std::string property_path = values[1];
     std::string output_filename = values[2];
+
+    if (property_path.size() == 0) {
+        std::cerr << "Error: property path is empty\n";
+        return 1;
+    }
+    if (property_path[0] == '/') {
+        // trim absolute path leading slash
+        property_path = property_path.substr(1);
+    }
 
     IFactory factory;
     IArchive archive = factory.getArchive(input_filename);
