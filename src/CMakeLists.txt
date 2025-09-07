@@ -4,6 +4,11 @@ PROJECT(ABCToFlat)
 
 OPTION(ALEMBIC_ROOT "Install prefix for Alembic installation")
 
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+
 # FindAlembic etc
 SET(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${PROJECT_SOURCE_DIR}/cmake)
 
@@ -45,6 +50,11 @@ set_target_properties(abc-compare PROPERTIES
         BUILD_RPATH ${ALEMBIC_LIBDIR}
         INSTALL_RPATH ${ALEMBIC_LIBDIR})
 
-INSTALL(TARGETS abc-parse abc-separate abc-combine)
+INSTALL(TARGETS
+        abc-parse
+        abc-separate
+        abc-combine
+        abc-compare
+)
 INSTALL(PROGRAMS abc-separate.py abc-combine.py
         TYPE BIN)
