@@ -40,29 +40,28 @@ using Alembic::AbcCoreFactory::IFactory;
 static const size_t maxPodDataSize =
     size_t(std::numeric_limits<uint8_t>::max()) * 8;
 
-struct Output : public std::ostream {
-  bool quiet = false;
-  template <class T> std::ostream &operator<<(const T &msg) {
-    if (quiet) {
-      return *this;
-    } else {
-      return std::cout << msg;
-    }
-  }
-};
-static Output output;
+// ostream-like class, helps process the verbose and quiet flags.
+class Output {
+private:
+  bool quiet;
 
-struct Verbose : public std::ostream {
-  bool verbose = false;
-  template <class T> std::ostream &operator<<(const T &msg) {
-    if (!verbose) {
-      return *this;
-    } else {
-      return output << msg;
+public:
+  Output(bool quiet) : quiet(quiet) { }
+
+  void make_quiet() { quiet = true; }
+  void make_verbose() { quiet = false; }
+
+  template <class T> Output &operator<<(const T &msg) {
+    if (!quiet) {
+      std::cout << msg;
     }
+    return *this;
   }
 };
-static Verbose verbose;
+
+// normal output is not quiet by default, but verbose output is.
+static Output output(false);
+static Output verbose(true);
 
 // Return the number of samples we need to check.
 // If the property is constant, then return 1.
@@ -129,7 +128,6 @@ static bool compare_leaf_property(PropertyReaderPtr readerA,
   if (nA != nB) {
     return false;
   }
-  size_t n = nA;
 
   if (readerA->getDataType() != readerB->getDataType()) {
     return false;
@@ -167,7 +165,7 @@ static bool compare_compound_property(const std::string &path,
   for (auto name : namesA) {
     std::string childPath = path + '/' + name;
     if (!namesB.count(name)) {
-      output << "- " << childPath << std::endl;
+      output << "- " << childPath << '\n';
       different = true;
     } else {
       auto propertyA = compoundA->getProperty(name);
@@ -179,7 +177,7 @@ static bool compare_compound_property(const std::string &path,
   }
   for (auto name : namesB) {
     if (!namesA.count(name)) {
-      output << "- " << path << '/' << name << std::endl;
+      output << "- " << path << '/' << name << '\n';
       different = true;
     }
   }
@@ -189,11 +187,11 @@ static bool compare_compound_property(const std::string &path,
 static bool compare_property(const std::string &path,
                              BasePropertyReaderPtr readerA,
                              BasePropertyReaderPtr readerB) {
-  verbose << "Comparing properties at " << path << "\n";
+  verbose << "Comparing properties at " << path << '\n';
 
   auto propertyType = readerA->getPropertyType();
   if (readerB->getPropertyType() != propertyType) {
-    output << "* " << path << std::endl;
+    output << "* " << path << '\n';
     return false;
   }
 
@@ -216,14 +214,14 @@ static bool compare_property(const std::string &path,
     break;
   }
   if (!sameLeaf) {
-    output << "* " << path << std::endl;
+    output << "* " << path << '\n';
   }
   return sameLeaf;
 }
 
 bool compare_object(const std::string &path, ObjectReaderPtr readerA,
                     ObjectReaderPtr readerB) {
-  verbose << "Comparing objects at " << path << "\n";
+  verbose << "Comparing objects at " << path << '\n';
   bool same = true;
 
   // Properties are under one nameless root property.
@@ -243,7 +241,7 @@ bool compare_object(const std::string &path, ObjectReaderPtr readerA,
     std::string childPath = path + '/' + childName;
     if (!childrenB.count(childName)) {
       same = false;
-      output << "- " << childPath << std::endl;
+      output << "- " << childPath << '\n';
     } else {
       if (!compare_object(childPath, readerA->getChild(childName),
                           readerB->getChild(childName))) {
@@ -254,7 +252,7 @@ bool compare_object(const std::string &path, ObjectReaderPtr readerA,
   for (auto childName : childrenB) {
     if (!childrenA.count(childName)) {
       same = false;
-      output << "+ " << path << '/' << childName << std::endl;
+      output << "+ " << path << '/' << childName << '\n';
     }
   }
 
@@ -264,7 +262,7 @@ bool compare_object(const std::string &path, ObjectReaderPtr readerA,
 // Read an alembic file, print its hierarchy in a human-readable format
 bool compare_alembic(const std::string &filenameA,
                      const std::string &filenameB) {
-  verbose << "Comparing " << filenameA << " and " << filenameB << "\n";
+  verbose << "Comparing " << filenameA << " and " << filenameB << '\n';
 
   // First, read. If we fail, just quit now with an error result.
   IFactory factory;
@@ -283,15 +281,42 @@ bool compare_alembic(const std::string &filenameA,
                         archiveB.getTop().getPtr());
 }
 
+void usage() {
+  std::cerr << "USAGE: abc-compare [--verbose|--quiet] file1.abc file2.abc\n";
+}
+
 int main(int argc, const char *const *argv) {
-  if (argc != 3) {
-    std::cerr << "USAGE: abc-compare file1.abc file2.abc\n";
+  std::vector<std::string> file_args;
+  bool process_flags = true;
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (process_flags) {
+      if (arg == "-v" || arg == "--verbose") {
+        verbose.make_verbose();
+        continue;
+      } else if (arg == "-q" || arg == "--quiet") {
+        output.make_quiet();
+        continue;
+      } else if (arg == "-h" || arg == "--help") {
+        usage();
+        return 0;
+      } else if (arg == "--") {
+        process_flags = false;
+        continue;
+      } else if (arg[0] == '-') {
+        usage();
+        return 1;
+      }
+    }
+    // not a flag -- must be a file argument
+    file_args.push_back(arg);
+  }
+  if (file_args.size() != 2) {
+    usage();
     return 1;
   }
-  output.quiet = false;
-  verbose.verbose = true;
-  std::string filenameA = argv[1];
-  std::string filenameB = argv[2];
+  std::string filenameA = file_args[0];
+  std::string filenameB = file_args[1];
   bool same = compare_alembic(filenameA, filenameB);
   return same ? 0 : 1;
 }
