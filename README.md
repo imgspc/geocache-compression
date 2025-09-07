@@ -9,3 +9,35 @@ The overall idea is:
 * Use the Academy Software Foundation's DPEL for sample data (and also the octopus).
 
 The target is SIGGRAPH 2026.
+
+## Building
+
+First, install Alembic 1.8.8 (or probably most any other version). I installed
+it in `~/projects/alembic-install` but it doesn't matter, you just have to know
+where you put it.
+
+```
+export ALEMBIC_ROOT=$HOME/projects/alembic-install
+mkdir build
+mkdir install
+cd build
+cmake ../src -DCMAKE_INSTALL_PREFIX=`pwd`/../install
+make install
+```
+
+## Testing
+
+Good idea for later.
+
+## Running
+
+Download the Alembic octopus into your downloads folder and unzip it in place. To use it, you need to have built Alembic with HDF5 support (which is not the default), since the example is ancient.
+
+Full loop. Run this from the build directory (so you can clean it out easily).
+```
+cd build
+../install/bin/abc-parse ~/Downloads/Alembic_Octopus_Example/alembic_octopus.abc > octopus.json
+python ../install/bin/abc-separate.py --verbose octopus.json
+python ../install/bin/abc-combine.py --verbose octopus.json out.abc
+../install/bin/abc-compare --verbose ~/Downloads/Alembic_Octopus_Example/alembic_octopus.abc out.abc
+```
