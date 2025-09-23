@@ -46,7 +46,7 @@ private:
   bool quiet;
 
 public:
-  Output(bool quiet) : quiet(quiet) { }
+  Output(bool quiet) : quiet(quiet) {}
 
   void make_quiet() { quiet = true; }
   void make_verbose() { quiet = false; }

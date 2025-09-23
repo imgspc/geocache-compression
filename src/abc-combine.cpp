@@ -187,11 +187,11 @@ void copyObject(Alembic::Abc::IObject &iIn, Alembic::Abc::OObject &iOut,
   std::size_t numChildren = iIn.getNumChildren();
   std::string pathPrefix = path + "/";
 
-  // Properties are under an unnamed root compound property, so just use the prefix.
+  // Properties are under an unnamed root compound property, so just use the
+  // prefix.
   Alembic::Abc::ICompoundProperty inProps = iIn.getProperties();
   Alembic::Abc::OCompoundProperty outProps = iOut.getProperties();
   copyProps(inProps, outProps, options, pathPrefix);
-
 
   // Objects are all named, so we add the child name
   for (std::size_t i = 0; i < numChildren; ++i) {
