@@ -100,18 +100,66 @@ class Header:
         return f"{self.extent} float{self.floatsize}_t per point, {self.size} points, {self.nsamples} samples"
 
 
+# Return a bool array where different values are listed as 'true'.
+# Note: negative and positive zero are equal.
+vector_are_ne = np.vectorize(lambda a, b: a != b)
+
+# Choose a or b depending on c (a is for True, b is for False).
+vector_mux = np.vectorize(lambda a, b, c: a if c else b)
+
+
 class SVD:
-    def __init__(self, c: np.ndarray, WVt: np.ndarray, U: np.ndarray):
+    def __init__(
+        self,
+        c: np.ndarray,
+        WVt: np.ndarray,
+        U: np.ndarray,
+        epsilon: np.ndarray,
+        clobbers: np.ndarray,
+    ):
         """
         U WVt + c should reconstruct the original data as well
         as is possible given dimensionality reduction and roundoff.
+
+        U WVt + c + epsilon should reconstruct the original data exactly.
+
+        There is a possibility that no value for epsilon can work. This can be true iff
+        (U WVt)[i,j] is very large compared to column[i,j]. In that case,
+        clobbers[i,j] will be True and epsilon[i,j] will be column[i,j].
         """
         self.c = c
         self.WVt = WVt
         self.U = U
+        self.epsilon = epsilon
+        self.clobbers = clobbers
+        assert clobbers.dtype == np.bool
 
     @staticmethod
-    def compute(column: np.ndarray, k: Optional[int] = None) -> SVD:
+    def _finish_compute(column: np.ndarray, c, WVt, U) -> SVD:
+        """
+        The SVD math having been performed, compute the epsilon and clobbers
+        arrays, and package it all into an SVD object.
+        """
+        # Compute the prediction, which will be approximate due to roundoff and
+        # dimensionality reduction.
+        predicted = U @ WVt + c
+
+        # Compute the error in the prediction.
+        epsilon = column - predicted
+
+        # Check that we can reconstruct precisely (bitwise)
+        reconstructed = predicted + epsilon
+
+        # The 'clobbers' array is all the values that didn't get reconstructed.
+        clobbers = vector_are_ne(column, reconstructed)
+
+        # If 'clobbers' is true then we use the actual data, and if it's false
+        # we use the error term that manages to actually reconstruct the data.
+        epsilon_mux = vector_mux(column, epsilon, clobbers)
+        return SVD(c, WVt, U, epsilon_mux, clobbers)
+
+    @staticmethod
+    def compute(column: np.ndarray, k: int = 0) -> SVD:
         """
         Perform SVD, optionally reducing to k dimensions.
         """
@@ -132,12 +180,12 @@ class SVD:
         # We definitely need U and V.
         # We don't want a square U, we only need it to be nsamples x n.
         # TODO: handle case of nsamples < n
-        U, s, Vt = np.linalg.svd(M, full_matrices = False)
+        U, s, Vt = np.linalg.svd(M, full_matrices=False)
 
         # No dimensionality reduction? Return right away.
-        if k is None or k == 0 or k == n:
-            WVt = np.dot(np.diag(s), Vt)
-            return SVD(c, WVt, U)
+        if k == 0 or k == n:
+            WVt = np.diag(s) @ Vt
+            return SVD._finish_compute(column, c, WVt, U)
 
         # Dimensionality reduction: Keep the most significant k values only.
         # Drop row/col from W (by dropping values from s), drop rows from Vt, drop
@@ -146,9 +194,9 @@ class SVD:
         # Return copies to allow the full-dimension memory to be released.
         # WVt_hat is already a copy due to the dot product.
         # U_hat we need to copy explictly.
-        WVt_hat = np.dot(np.diag(s[0:k]), Vt[0:k, :])
+        WVt_hat = np.diag(s[0:k]) @ Vt[0:k, :]
         U_hat = np.array(U[:, 0:k])
-        return SVD(c, WVt_hat, U_hat)
+        return SVD._finish_compute(column, c, WVt_hat, U_hat)
 
     @staticmethod
     def header_size(extent: int, k: int, floatsize: int) -> int:
@@ -194,38 +242,7 @@ def read_file(binfile: str, header: Header) -> np.ndarray:
     return np.fromfile(binfile, dtype=dtype)
 
 
-def svd_error(column: np.ndarray, svd: SVD) -> np.ndarray:
-    """
-    Given a column and its SVD, compute the error terms:
-        (UWVt + c) + epsilon = column
-
-    Output has the same shape as column.
-
-    Components of epsilon are infinity if you can't get bitwise the exact right answer by
-    adding to the UWVt+c value. This can happen with column values near zero.
-    """
-    predicted = np.dot(svd.U, svd.WVt) + svd.c
-
-    # mathematically, this is epsilon
-    epsilon = column - predicted
-
-    # but we're in ieee752, so make sure componentwise that predicted + epsilon is actually
-    # exactly column.
-    reconstructed = predicted + epsilon
-    (nsamples, extent) = reconstructed.shape
-    infinity = float("inf")
-
-    # TODO: vectorize this
-    for row in range(nsamples):
-        for col in range(extent):
-            if reconstructed[row, col] != column[row, col]:
-                # TODO: can we fix this by tweaking epsilon
-                epsilon[row, col] = infinity
-
-    return epsilon
-
-
-def svd_file(f: np.ndarray, k: Optional[int] = None) -> Iterable[SVD]:
+def svd_file(f: np.ndarray, k: int = 0) -> Iterable[SVD]:
     """
     Given a parsed file as a nsamples x size x extent array, run SVD
     piecewise on each nsamples x extent slice.
@@ -287,6 +304,8 @@ def convert(jsonfile: str, binfile: str) -> str:
     # shape is [size, nsamples, k] which isn't ideal but it'll do
     # the argument to np.array *must* be a list, not an iterator
     u_array = np.array([c.U for c in svds])
+    eps_array = np.array([c.epsilon for c in svds])
+    mux_array = np.array([c.clobbers for c in svds])
     print(f"U values to write: {u_array.shape}")
 
     # now write the values
@@ -295,15 +314,22 @@ def convert(jsonfile: str, binfile: str) -> str:
         # Write the header first.
         out.write(header.pack())
 
-        # Write the value headers one after the other
+        # Write the SVD headers one after the other
         for svd in svds:
             out.write(svd.pack_header())
 
-        # Write out the U values per timestep
+        # Write out the U, epsilon, and clobbers values per timestep
+        # clobbers is packed into a bitvector (no reason to store 8 bits per bool)
         for time in range(header.nsamples):
-            data = u_array[:, time, :]
-            print(f"[{time}] => {data.shape}")
-            out.write(data.tobytes())
+            data = u_array[:, time, :].tobytes()
+            out.write(data)
+
+            data = eps_array[:, time, :].tobytes()
+            out.write(data)
+
+            clobbers = mux_array[:, time, :]
+            data = np.packbits(clobbers).tobytes()
+            out.write(data)
 
     return outname
 
