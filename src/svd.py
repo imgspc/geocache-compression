@@ -30,7 +30,7 @@ from numpy.typing import DTypeLike
 #       k: int8 (note: k <= extent)
 #       size: int64
 #       nsamples: int64
-# Curve header: for i in 0 to size:
+# SVD header: for i in 0 to size:
 #       c: type array of length extent (centroid of the ith column)
 #       WV^t: type matrix of size k x extent, row-major (SVD of the ith column)
 # Samples:
@@ -100,7 +100,7 @@ class Header:
         return f"{self.extent} float{self.floatsize}_t per point, {self.size} points, {self.nsamples} samples"
 
 
-class Curve:
+class SVD:
     def __init__(self, c: np.ndarray, WVt: np.ndarray, U: np.ndarray):
         """
         U WVt + c should reconstruct the original data as well
@@ -111,9 +111,47 @@ class Curve:
         self.U = U
 
     @staticmethod
+    def compute(column: np.ndarray, k: Optional[int] = None) -> SVD:
+        """
+        Perform SVD, optionally reducing to k dimensions.
+        """
+        n = len(column)
+        if not n:
+            raise ValueError("Can't run SVD on empty matrix")
+
+        # First, compute the centroid.
+        c = sum(column) / n
+
+        # Translate the data by element-wise subtracting the centroid.
+        M = column - c
+
+        # Perform SVD:
+        # Vt is the orthonormal basis,
+        # W is the weight matrix, represented as just the singular values s
+        # on its diagonal.
+        # U is the data rewritten in the SVD basis.
+        U, s, Vt = np.linalg.svd(M)
+
+        # No dimensionality reduction? Return right away.
+        if k is None or k == 0 or k == n:
+            WVt = np.diag(s) * Vt
+            return SVD(c, WVt, U)
+
+        # Dimensionality reduction: Keep the most significant k values only.
+        # Drop row/col from W (by dropping values from s), drop rows from Vt, drop
+        # columns from U.
+        #
+        # Return copies to allow the full-dimension memory to be released.
+        # WVt_hat is already a copy from the multiply.
+        # U_hat we need to copy explictly.
+        WVt_hat = np.diag(s[0:k]) * Vt[0:k, :]
+        U_hat = np.array(U[:, 0:k])
+        return SVD(c, WVt_hat, U_hat)
+
+    @staticmethod
     def header_size(extent: int, k: int, floatsize: int) -> int:
         """
-        Return the number of bytes needed for the curve header given the extent, k,
+        Return the number of bytes needed for the SVD header given the extent, k,
         and float types specified.
         """
         if k == 0:
@@ -122,7 +160,7 @@ class Curve:
 
     def pack_header(self) -> bytes:
         """
-        Return the bytes of the curve header we currently store.
+        Return the bytes of the SVD header we currently store.
         """
         return self.c.tobytes() + self.WVt.tobytes()
 
@@ -154,51 +192,7 @@ def read_file(binfile: str, header: Header) -> np.ndarray:
     return np.fromfile(binfile, dtype=dtype)
 
 
-def svd(column, k: Optional[int] = None) -> Curve:
-    """
-    Perform SVD, optionally reducing to k dimensions.
-
-    Return a tuple including:
-        * the curve header (the centroid and transformation matrix)
-        * the transformed data
-    """
-    n = len(column)
-    if not n:
-        raise ValueError("Can't run SVD on empty matrix")
-
-    # First, compute the centroid.
-    c = sum(column) / n
-
-    # Translate the data by element-wise subtracting the centroid.
-    M = column - c
-
-    # Perform SVD:
-    # Vt is the orthonormal basis,
-    # W is the weight matrix, represented as just the singular values s
-    # on its diagonal.
-    # U is the data rewritten in the SVD basis.
-    U, s, Vt = np.linalg.svd(M)
-
-    print(f"{s}")
-
-    # No dimensionality reduction? Return right away.
-    if k is None or k == n:
-        WVt = np.diag(s) * Vt
-        return Curve(c, WVt, U)
-
-    # Dimensionality reduction: Keep the most significant k values only.
-    # Drop row/col from W (by dropping values from s), drop rows from Vt, drop
-    # columns from U.
-    #
-    # Return copies to allow the full-dimension memory to be released.
-    # WVt_hat is already a copy from the multiply.
-    # U_hat we need to copy explictly.
-    WVt_hat = np.diag(s[0:k]) * Vt[0:k, :]
-    U_hat = np.array(U[:, 0:k])
-    return Curve(c, WVt_hat, U_hat)
-
-
-def svd_error(column: np.ndarray, curve: Curve) -> np.ndarray:
+def svd_error(column: np.ndarray, svd: SVD) -> np.ndarray:
     """
     Given a column and its SVD, compute the error terms:
         (UWVt + c) + epsilon = column
@@ -208,7 +202,7 @@ def svd_error(column: np.ndarray, curve: Curve) -> np.ndarray:
     Components of epsilon are infinity if you can't get bitwise the exact right answer by
     adding to the UWVt+c value. This can happen with column values near zero.
     """
-    predicted = curve.U * curve.WVt + curve.c
+    predicted = svd.U * svd.WVt + svd.c
 
     # mathematically, this is epsilon
     epsilon = column - predicted
@@ -229,14 +223,14 @@ def svd_error(column: np.ndarray, curve: Curve) -> np.ndarray:
     return epsilon
 
 
-def svd_file(f: np.ndarray, k: Optional[int] = None) -> Iterable[Curve]:
+def svd_file(f: np.ndarray, k: Optional[int] = None) -> Iterable[SVD]:
     """
     Given a parsed file as a nsamples x size x extent array, run SVD
     piecewise on each nsamples x extent slice.
     """
     (nsamples, size, extent) = f.shape
 
-    return (svd(f[:, i, :], k) for i in range(size))
+    return (SVD.compute(f[:, i, :], k) for i in range(size))
 
 
 def parse_json(jsonfile: str, binfile: str) -> Header:
@@ -289,7 +283,9 @@ def convert(jsonfile: str, binfile: str) -> str:
 
     # make an array out of the U values, for ease later.
     # shape is [size, nsamples, k] which isn't ideal but it'll do
-    u_array = np.array((c.U for c in svds))
+    # the argument to np.array *must* be a list, not an iterator
+    u_array = np.array([c.U for c in svds])
+    print(f"U values to write: {u_array.shape}")
 
     # now write the values
     outname = os.path.splitext(binfile)[0] + ".svd.bin"
@@ -298,12 +294,14 @@ def convert(jsonfile: str, binfile: str) -> str:
         out.write(header.pack())
 
         # Write the value headers one after the other
-        for curve in svds:
-            out.write(curve.pack_header())
+        for svd in svds:
+            out.write(svd.pack_header())
 
         # Write out the U values per timestep
         for time in range(header.nsamples):
-            out.write(u_array[:, time, :].tobytes())
+            data = u_array[:, time, :]
+            print(f"[{time}] => {data.shape}")
+            out.write(data.tobytes())
 
     return outname
 
