@@ -119,22 +119,24 @@ class SVD:
         if not n:
             raise ValueError("Can't run SVD on empty matrix")
 
-        # First, compute the centroid.
+        # Translate the data to the origin.
         c = sum(column) / n
-
-        # Translate the data by element-wise subtracting the centroid.
         M = column - c
 
         # Perform SVD:
         # Vt is the orthonormal basis,
-        # W is the weight matrix, represented as just the singular values s
-        # on its diagonal.
+        # W is the diagonal weight matrix, stored as a vector of singular values
         # U is the data rewritten in the SVD basis.
-        U, s, Vt = np.linalg.svd(M)
+        #
+        # We can't assume M is hermitian, so we need the full computation.
+        # We definitely need U and V.
+        # We don't want a square U, we only need it to be nsamples x n.
+        # TODO: handle case of nsamples < n
+        U, s, Vt = np.linalg.svd(M, full_matrices = False)
 
         # No dimensionality reduction? Return right away.
         if k is None or k == 0 or k == n:
-            WVt = np.diag(s) * Vt
+            WVt = np.dot(np.diag(s), Vt)
             return SVD(c, WVt, U)
 
         # Dimensionality reduction: Keep the most significant k values only.
@@ -142,9 +144,9 @@ class SVD:
         # columns from U.
         #
         # Return copies to allow the full-dimension memory to be released.
-        # WVt_hat is already a copy from the multiply.
+        # WVt_hat is already a copy due to the dot product.
         # U_hat we need to copy explictly.
-        WVt_hat = np.diag(s[0:k]) * Vt[0:k, :]
+        WVt_hat = np.dot(np.diag(s[0:k]), Vt[0:k, :])
         U_hat = np.array(U[:, 0:k])
         return SVD(c, WVt_hat, U_hat)
 
@@ -152,7 +154,7 @@ class SVD:
     def header_size(extent: int, k: int, floatsize: int) -> int:
         """
         Return the number of bytes needed for the SVD header given the extent, k,
-        and float types specified.
+        and float size (in bits).
         """
         if k == 0:
             k = extent
@@ -202,7 +204,7 @@ def svd_error(column: np.ndarray, svd: SVD) -> np.ndarray:
     Components of epsilon are infinity if you can't get bitwise the exact right answer by
     adding to the UWVt+c value. This can happen with column values near zero.
     """
-    predicted = svd.U * svd.WVt + svd.c
+    predicted = np.dot(svd.U, svd.WVt) + svd.c
 
     # mathematically, this is epsilon
     epsilon = column - predicted
