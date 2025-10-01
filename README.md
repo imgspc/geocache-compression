@@ -41,3 +41,5 @@ python ../install/bin/abc-separate.py --verbose octopus.json
 python ../install/bin/abc-combine.py --verbose octopus.json out.abc
 ../install/bin/abc-compare --verbose ~/Downloads/Alembic_Octopus_Example/alembic_octopus.abc out.abc
 ```
+
+That parses an .abc file, separates out all the properties into their own .bin files, combines them, and compares the results.
