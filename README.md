@@ -12,7 +12,7 @@ The target is SIGGRAPH 2026.
 
 ## Building
 
-First, install [Alembic 1.8.8]([url](https://github.com/alembic/alembic)) (or probably most any other version). I installed
+First, install [https://github.com/alembic/alembic](Alembic 1.8.8) (or probably most any other version). I installed
 it in `~/projects/alembic-install` but it doesn't matter, you just have to know
 where you put it.
 
