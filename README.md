@@ -5,8 +5,9 @@ files, e.g. Alembic files.
 
 The overall idea is:
 * Each coordinate is a time series, so use time series compression. E.g. Guerra et all 2025: https://arxiv.org/pdf/2412.16266
-** Need to experiment with how to deal with positions versus normals, trying to cluster rather than seeing each coordinate of each vertex as independent, etc.
-* Use the Academy Software Foundation's DPEL for sample data (and also the octopus).
+* Figure out how to move to high dimension (hundreds of thousands) but short length (tens to hundreds of samples), rather than 1-d and long timeseries.
+* In particular, figure out how to reduce dimension, e.g. with clustering and dimensionality reduction techniques.
+* Use the Academy Software Foundation's DPEL and the alembic octopus for sample data
 
 The target is SIGGRAPH 2026.
 
