@@ -31,7 +31,7 @@ Good idea for later.
 
 ## Running
 
-Download the Alembic octopus into your downloads folder and unzip it in place. To use it, you need to have built Alembic with HDF5 support (which is not the default), since the example is ancient.
+Download `Alembic_Octopus_Example.tgz` from the [google code downloads page](https://code.google.com/archive/p/alembic/downloads) into your downloads folder and unzip it in place. To use it, you need to have built Alembic with HDF5 support (which is not the default), since the example is ancient.
 
 Full loop. Run this from the build directory (so you can clean it out easily).
 ```
@@ -43,3 +43,9 @@ python ../install/bin/abc-combine.py --verbose octopus.json out.abc
 ```
 
 That parses an .abc file, separates out all the properties into their own .bin files, combines them, and compares the results.
+
+## Links
+
+* Alembic discussion group: https://groups.google.com/g/alembic-discussion
+* Alembic google code downloads page (for the octopus): https://code.google.com/archive/p/alembic/downloads
+* DPEL: https://dpel.aswf.io/
