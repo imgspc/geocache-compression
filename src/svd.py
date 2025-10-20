@@ -107,7 +107,6 @@ vector_are_ne = np.vectorize(lambda a, b: a != b)
 # Choose a or b depending on c (a is for True, b is for False).
 vector_mux = np.vectorize(lambda a, b, c: a if c else b)
 
-
 class SVD:
     def __init__(
         self,
@@ -335,7 +334,8 @@ def convert(jsonfile: str, binfile: str) -> str:
 
 
 def main(jsonfile: str, binfile: str):
-    convert(jsonfile, binfile)
+    outname = convert(jsonfile, binfile)
+    print(f"output written to {outname}")
 
 
 if __name__ == "__main__":
