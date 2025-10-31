@@ -224,7 +224,7 @@ class PCAEmbedding(Embedding):
             # WVt is already a copy due to the matmul.
             # U we need to copy explictly.
             WVt = np.diag(s[0:count]) @ Vt[0:count, :]
-            U = np.array(U[:, 0:count])
+            U = np.array(U[:, 0:count], copy=True)
 
         embedding = PCAEmbedding(n, m, count, c, WVt)
         embedding.U = U
@@ -297,7 +297,7 @@ class PCAEmbedding(Embedding):
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
         t = self.c.dtype
         U_flat = np.frombuffer(b, offset=offset, dtype=t, count=self.k * self.n)
-        U = np.reshape(U_flat, (self.k, self.n))
+        U = np.reshape(U_flat, (self.n, self.k))
         offset += t.itemsize * self.k * self.n
 
         return (U, offset)

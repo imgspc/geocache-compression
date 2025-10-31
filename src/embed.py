@@ -41,7 +41,7 @@ def convert(jsonfile: str, binfile: str) -> str:
     header.verify_shape(f)
 
     # Form the clusters
-    cover = clustering.cluster_by_index(header.size, 10)
+    cover = clustering.cluster_by_index(header.size, 3)
     print(f"found {cover.nsubsets} clusters")
 
     # TODO: parallelize the computation.
