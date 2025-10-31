@@ -1,6 +1,6 @@
 /build/
 /install/
 
-.DS_Store/
+.DS_Store
 __pycache__/
 *.sw[op]
