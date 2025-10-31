@@ -251,7 +251,7 @@ class PCAEmbedding(Embedding):
             self.WVtInv = np.linalg.pinv(self.WVt)
         return data @ self.WVtInv
 
-    def invert(self, data: Domain) -> Reduced:
+    def invert(self, data: Reduced) -> Domain:
         return data @ self.WVt + self.c
 
     def tobytes(self) -> bytes:

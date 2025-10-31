@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import numpy as np
 import struct
 
-from typing import Union, Optional, Iterator, Iterable, Sequence, cast
-
-from .util import pack_small_uint, unpack_small_uint, pack_dtype, unpack_dtype
+from typing import Iterator, Sequence, cast
 
 
 #
@@ -29,12 +26,33 @@ class Covering:
         """
         Use from_arrays or from_bytes instead.
         """
-        self.indices = indices
-        self.offsets = offsets
+        self.indices = indices.astype(np.uint32)
+        self.offsets = offsets.astype(np.uint32)
 
     @property
     def nsubsets(self) -> int:
         return len(self.offsets)
+
+    def is_id_permutation(self) -> bool:
+        """
+        Return whether the covering, unsliced, is already sorted (True), or whether it
+        needs to be reindexed (False).
+
+        Recommendation: if a covering is *not* the identity, then set the first
+        index to something other than 0 and we'll find it fastest.
+        """
+        if self.indices[0] != 0:
+            return False
+        if self.indices[-1] != len(self.indices) - 1:
+            return False
+
+        # is_sorted is somehow not a native operation, have to do this nonsense
+        #
+        # We are comparing component-wise whether the array except the last
+        # element is smaller than the array except the first element, creating
+        # a bool array for that, and return true if all are true.
+        #
+        return bool(np.all(self.indices[:-1] <= self.indices[1:]))
 
     @property
     def subsets(self) -> Iterator[np.ndarray]:
@@ -75,15 +93,17 @@ class Covering:
 
         # Read the length of the covering, then the covering.
         nindices = struct.unpack_from(">I", b, offset)[0]
+        print(f"reading {nindices} indices")
         offset += 4
         indices = np.frombuffer(b, dtype=np.uint32, count=nindices, offset=offset)
-        offset += nindices * np.uint32.itemsize
+        offset += nindices * indices.itemsize
 
         # Read the length of the offsets, then the offsets.
         noffsets = struct.unpack_from(">I", b, offset)[0]
+        print(f"reading {noffsets} offsets")
         offset += 4
         offsets = np.frombuffer(b, dtype=np.uint32, count=noffsets, offset=offset)
-        offset += noffsets * np.uint32.itemsize
+        offset += noffsets * offsets.itemsize
 
         return (Covering(indices, offsets), offset)
 
@@ -117,6 +137,29 @@ def slice(a: np.ndarray, cover: Covering) -> Iterator[np.ndarray]:
     nsamples, nverts, ndim = a.shape
     for subset in cover.subsets:
         yield a.take(subset, axis=1).reshape(nsamples, len(subset) * ndim)
+
+
+def unslice(slices: list[np.ndarray], cover: Covering, ndim: int) -> np.ndarray:
+    """
+    Given matrices with shape (nsamples, len(subset) * ndim), get back
+    an array with shape (nsamples, nverts, ndim).
+    """
+    if len(slices) != cover.nsubsets:
+        raise ValueError(f"Unmatched slicings: {len(slices)} versus {cover.nsubsets}")
+
+    # Reshape the list of slices
+    flattened = np.concatenate(slices, axis=1)
+    (nsamples, ndata) = flattened.shape
+    if ndata % ndim != 0:
+        raise ValueError(f"Data is not {ndim}-dimensional: shape {flattened.shape}")
+    nverts = ndata // ndim
+    byvertex = np.reshape(flattened, shape=(nsamples, nverts, ndim))
+
+    # Check if we need to reorder
+    if not cover.is_id_permutation():
+        raise ValueError("Reordering covers is not yet supported")
+
+    return byvertex
 
 
 def cluster_by_vertex(n: int) -> Covering:

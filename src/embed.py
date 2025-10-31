@@ -20,6 +20,7 @@ from embedding.io import Header, read_file, parse_json
 # Output:
 #       .embed-header.bin
 #       .embed.bin
+#       .embed-clusters.bin
 #
 # The embed-header is a list of Embedding objects, serialized. One object per vertex.
 #
@@ -56,7 +57,7 @@ def convert(jsonfile: str, binfile: str) -> str:
     with open(headersbin, "wb") as headerfile:
         with open(projectedbin, "wb") as projectedfile:
             for i, cluster in enumerate(clusters):
-                headerfile.write(embedded[i].tobytes())
+                headerfile.write(embedding.serialize(embedded[i]))
                 projected = embedded[i].project(cluster)
                 projectedfile.write(projected.tobytes())
     with open(clusterbin, "wb") as clusterfile:
