@@ -41,13 +41,13 @@ def convert(jsonfile: str, binfile: str) -> str:
     header.verify_shape(f)
 
     # Form the clusters
-    cover = clustering.cluster_by_index(header.size, 3)
+    cover = clustering.cluster_by_index(header.size, 10000)
     print(f"found {cover.nsubsets} clusters")
 
     # TODO: parallelize the computation.
     clusters = list(clustering.slice(f, cover))
     embedded = [
-        embedding.PCAEmbedding.from_data(cluster, 0.995) for cluster in clusters
+        embedding.PCAEmbedding.from_data(cluster, 0.999) for cluster in clusters
     ]
 
     basename = os.path.splitext(binfile)[0]
@@ -60,8 +60,12 @@ def convert(jsonfile: str, binfile: str) -> str:
                 headerfile.write(embedding.serialize(embedded[i]))
                 projected = embedded[i].project(cluster)
                 projectedfile.write(projected.tobytes())
+            projectedfilesize = projectedfile.tell()
+        headerfilesize = headerfile.tell()
     with open(clusterbin, "wb") as clusterfile:
         clusterfile.write(cover.tobytes())
+        clusterfilesize = clusterfile.tell()
+    print(f"Wrote {clusterfilesize + headerfilesize + projectedfilesize} bytes")
 
     return projectedbin
 
