@@ -39,6 +39,9 @@ class Header:
         else:
             self.binpath = re.sub(r"[-./ ()]", "-", objpath).strip("-")
 
+    def numbytes(self) -> int:
+        return (self.floatsize // 8) * self.size * self.extent * self.nsamples
+
     def matches(self, name: str) -> bool:
         """
         Does the name match this header?
@@ -50,7 +53,7 @@ class Header:
             return True
         if name == self.binpath:
             return True
-        if os.path.basename(name) == os.path.basename(name):
+        if os.path.basename(name) == os.path.basename(self.binpath):
             return True
         return False
 
@@ -104,7 +107,7 @@ class Header:
         )
 
     def __str__(self) -> str:
-        return f"{self.extent} float{self.floatsize}_t per point, {self.size} points, {self.nsamples} samples"
+        return f"{self.path} -- {self.extent} float{self.floatsize}_t per point, {self.size} points, {self.nsamples} samples"
 
 
 class Package:
@@ -173,7 +176,7 @@ def parse_json_file(jsonfile: str) -> Package:
     return parse_json(data)
 
 
-def separate_usd(usdfile: str, outdir: str) -> Package:
+def separate_usd(usdfile: str, outdir: str, verbose: bool = False) -> Package:
     """
     Separate out a USD file and return the resulting package.
 
@@ -199,10 +202,10 @@ def separate_usd(usdfile: str, outdir: str) -> Package:
             continue
         times = attr.GetTimeSamples()
         data = np.array([attr.Get(t) for t in times])
-        print(f"{prim.GetPath()} {data.shape} {data.dtype}")
+        if verbose:
+            print(f"{prim.GetPath()} {data.shape} {data.dtype}")
         filename = re.sub(r"[-./ ()]", "-", str(prim.GetPath())).strip("-")
         filepath = f"{outdir}/{filename}.bin"
-        print(filepath)
         with open(filepath, "wb") as f:
             f.write(data.tobytes())
         headers.append(
@@ -222,3 +225,54 @@ def separate_usd(usdfile: str, outdir: str) -> Package:
     with open(filepath, "w") as f:
         json.dump(package.tojson(), f)
     return package
+
+
+def create_embedding(
+    header: Header, quality: float = 0.999, clustersize: int = 10000, verbose=False
+) -> list[str]:
+    """
+    Create an embedding for the specific property.
+
+    Return the names of all the binary files created.
+    """
+    if verbose:
+        print(f"reducing dimension of {header}")
+
+    # Read the data
+    data = read_binfile(header)
+
+    if verbose:
+        print(f"  read {data.size * data.itemsize} bytes")
+
+    # Form the clusters
+    cover = clustering.cluster_by_index(header.size, clustersize)
+    if verbose:
+        print(f"  created {cover.nsubsets} clusters")
+
+    # TODO: parallelize the computation.
+    clusters = list(clustering.slice(data, cover))
+    embeddings = [
+        embedding.PCAEmbedding.from_data(cluster, quality, verbose=verbose)
+        for cluster in clusters
+    ]
+
+    basename = os.path.splitext(header.binpath)[0]
+    headersbin = basename + ".embed-header.bin"
+    projectedbin = basename + ".embed.bin"
+    clusterbin = basename + ".embed-clusters.bin"
+
+    with open(headersbin, "wb") as headerfile:
+        with open(projectedbin, "wb") as projectedfile:
+            for cluster, embed in zip(clusters, embeddings):
+                headerfile.write(embedding.serialize(embed))
+                projected = embed.project(cluster)
+                projectedfile.write(projected.tobytes())
+            projectedfilesize = projectedfile.tell()
+        headerfilesize = headerfile.tell()
+    with open(clusterbin, "wb") as clusterfile:
+        clusterfile.write(cover.tobytes())
+        clusterfilesize = clusterfile.tell()
+    if verbose:
+        print(f"  wrote {clusterfilesize + headerfilesize + projectedfilesize} bytes")
+
+    return [headersbin, projectedbin, clusterbin]

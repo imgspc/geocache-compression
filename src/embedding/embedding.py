@@ -168,7 +168,9 @@ class PCAEmbedding(Embedding):
         self.WVtInv: Optional[np.ndarray] = None
 
     @staticmethod
-    def from_data(data: Domain, k: Union[int, float] = 0) -> PCAEmbedding:
+    def from_data(
+        data: Domain, k: Union[int, float] = 0, verbose: bool = False
+    ) -> PCAEmbedding:
         """
         Perform PCA on the data, which must have shape (n, m).
 
@@ -207,7 +209,8 @@ class PCAEmbedding(Embedding):
             # find the number of components needed to explain more than k of the variance
             running_sum = s.cumsum() / s.sum()
             count = 1 + running_sum.searchsorted(k)
-            print(f"chose {count} dimensions among {running_sum}")
+            if verbose:
+                print(f"chose {count} dimensions among {running_sum}")
         else:
             raise ValueError(
                 f"invalid value {k} ({type(k)}) should be zero, a float in (0,1) or a positive int"
