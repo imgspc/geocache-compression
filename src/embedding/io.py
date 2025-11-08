@@ -110,9 +110,10 @@ class Header:
 
 
 class Package:
-    def __init__(self, inputfile: str, headers: list[Header]):
+    def __init__(self, inputfile: str, headers: list[Header], metersPerUnit: float):
         self.inputfile = inputfile
         self.headers = headers
+        self.metersPerUnit = metersPerUnit
 
     def get_header(self, key: str) -> Header:
         for header in self.headers:
@@ -124,6 +125,7 @@ class Package:
         return {
             "path": self.inputfile,
             "components": [header.tojson() for header in self.headers],
+            "mpu": self.metersPerUnit,
         }
 
 
@@ -164,9 +166,15 @@ def parse_json(jsonstr: str) -> Package:
     filename = ""
     if "abc" in parsed_json:
         filename = parsed_json["abc"]
-    elif "usd" in parsed_json:
-        filename = parsed_json["usd"]
-    return Package(filename, headers)
+    elif "path" in parsed_json:
+        filename = parsed_json["path"]
+    if "mpu" in parsed_json:
+        mpu = parsed_json["mpu"]
+    else:
+        # Alembic doesn't define an MPU but Autodesk Maya defaults to 0.01
+        # USD *does* define an MPU and its default is 0.01 (probably because of Maya)
+        mpu = 0.01
+    return Package(filename, headers, mpu)
 
 
 def parse_json_file(jsonfile: str) -> Package:
@@ -188,6 +196,10 @@ def separate_usd(usdfile: str, outdir: str, verbose: bool = False) -> Package:
     from pxr import Usd, UsdGeom, Sdf  # type: ignore
 
     stage = Usd.Stage.Open(usdfile)
+    if stage.HasMetadata("metersPerUnit"):
+        mpu = stage.GetMetadata("metersPerUnit")
+    else:
+        mpu = 0.01
 
     headers: list[Header] = []
     for prim in stage.Traverse():
@@ -219,7 +231,7 @@ def separate_usd(usdfile: str, outdir: str, verbose: bool = False) -> Package:
                 }
             )
         )
-    package = Package(usdfile, headers)
+    package = Package(usdfile, headers, mpu)
     filepath = f"{outdir}/{os.path.basename(usdfile)}.json"
     with open(filepath, "w") as f:
         json.dump(package.tojson(), f)

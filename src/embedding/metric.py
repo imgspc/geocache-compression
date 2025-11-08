@@ -69,7 +69,12 @@ def numdifferent(A: np.ndarray, B: Optional[np.ndarray] = None) -> int:
 
 
 class Report:
-    def __init__(self, predata: np.ndarray, postdata: np.ndarray, compressed_size: int):
+    def __init__(
+        self,
+        predata: np.ndarray,
+        postdata: np.ndarray,
+        compressed_size: int,
+    ):
         # Sizes in bytes.
         self.original_size = predata.itemsize * predata.size
         self.compressed_size = compressed_size
@@ -89,16 +94,17 @@ class Report:
         self.corrected_Linf = Linf(predata, corrected)
         self.numuncorrectable = numdifferent(predata, corrected)
 
-    def print_report(self):
+    def print_report(self, metersPerUnit: float):
+        mpu = metersPerUnit
         compression_ratio = 1 - self.compressed_size / self.original_size
         print(
             f"{self.original_size} reduced to {self.compressed_size}: {compression_ratio:.2%} reduction"
         )
-        range_string = " ".join(f"{x:.2f}" for x in self.range)
-        print(f"Range: {range_string}")
-        print(f"Hausdorff (pointwise): {self.hausdorff}")
-        print(f"Linf: {self.Linf}")
-        print(f"Linf after error-correct: {self.corrected_Linf}")
+        range_string = " ".join(f"{x:.2f}" for x in self.range * mpu)
+        print(f"Range: {range_string} m")
+        print(f"Hausdorff (pointwise): {self.hausdorff * mpu} m")
+        print(f"Linf: {self.Linf * mpu} m")
+        print(f"Linf after error-correct: {self.corrected_Linf * mpu} m")
         uncorrectable_ratio = self.numuncorrectable / self.original_numvalues
         print(
             f"{self.numuncorrectable} uncorrectable entries; {uncorrectable_ratio:.2%} of entries"

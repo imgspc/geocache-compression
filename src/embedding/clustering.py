@@ -93,14 +93,12 @@ class Covering:
 
         # Read the length of the covering, then the covering.
         nindices = struct.unpack_from(">I", b, offset)[0]
-        print(f"reading {nindices} indices")
         offset += 4
         indices = np.frombuffer(b, dtype=np.uint32, count=nindices, offset=offset)
         offset += nindices * indices.itemsize
 
         # Read the length of the offsets, then the offsets.
         noffsets = struct.unpack_from(">I", b, offset)[0]
-        print(f"reading {noffsets} offsets")
         offset += 4
         offsets = np.frombuffer(b, dtype=np.uint32, count=noffsets, offset=offset)
         offset += noffsets * offsets.itemsize
