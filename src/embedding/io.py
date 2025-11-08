@@ -66,6 +66,43 @@ class Header:
                 f"expected shape {expected}, actual binfile is shape {shape}"
             )
 
+    def tojson(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "type": self.floatsize,
+            "samples": self.nsamples,
+            "size": self.size,
+            "extent": self.extent,
+            "bin": self.binpath,
+        }
+
+    @staticmethod
+    def fromjson(component: dict[str, Any]) -> Header:
+        float_type = component["type"]
+        if isinstance(float_type, int):
+            floatsize: int = float_type
+        else:
+            match float_type:
+                case "float16" | "float16_t":
+                    floatsize = 16
+                case "float32" | "float32_t":
+                    floatsize = 32
+                case "float64" | "float64_t":
+                    floatsize = 64
+                case _:
+                    component_name = component["path"]
+                    raise ValueError(
+                        f"unhandled type {float_type} for {component_name}"
+                    )
+        return Header(
+            objpath=str(component["path"]),
+            floatsize=floatsize,
+            extent=int(component["extent"]),
+            size=int(component["size"]),
+            nsamples=int(component["samples"]),
+            binpath=str(component["bin"]),
+        )
+
     def __str__(self) -> str:
         return f"{self.extent} float{self.floatsize}_t per point, {self.size} points, {self.nsamples} samples"
 
@@ -80,6 +117,12 @@ class Package:
             if header.matches(key):
                 return header
         raise KeyError(f"{key} not found in package for {self.inputfile}")
+
+    def tojson(self) -> dict[str, Any]:
+        return {
+            "path": self.inputfile,
+            "components": [header.tojson() for header in self.headers],
+        }
 
 
 def read_binfile(header: Header) -> np.ndarray:
@@ -115,33 +158,7 @@ def parse_json(jsonstr: str) -> Package:
     """
     parsed_json = json.loads(jsonstr)
 
-    def make_header(component) -> Header:
-        float_type = component["type"]
-        if isinstance(float_type, int):
-            floatsize = float_type
-        else:
-            match float_type:
-                case "float16" | "float16_t":
-                    floatsize = 16
-                case "float32" | "float32_t":
-                    floatsize = 32
-                case "float64" | "float64_t":
-                    floatsize = 64
-                case _:
-                    component_name = component["path"]
-                    raise ValueError(
-                        f"unhandled type {float_type} for {component_name}"
-                    )
-        return Header(
-            objpath=component["path"],
-            floatsize=floatsize,
-            extent=component["extent"],
-            size=component["size"],
-            nsamples=component["samples"],
-            binpath=component["bin"],
-        )
-
-    headers = [make_header(component) for component in parsed_json["components"]]
+    headers = [Header.fromjson(component) for component in parsed_json["components"]]
     filename = ""
     if "abc" in parsed_json:
         filename = parsed_json["abc"]
@@ -170,7 +187,7 @@ def separate_usd(usdfile: str, outdir: str) -> Package:
 
     stage = Usd.Stage.Open(usdfile)
 
-    components = []
+    headers: list[Header] = []
     for prim in stage.Traverse():
         if not prim.IsA(UsdGeom.Mesh):
             continue
@@ -188,22 +205,20 @@ def separate_usd(usdfile: str, outdir: str) -> Package:
         print(filepath)
         with open(filepath, "wb") as f:
             f.write(data.tobytes())
-        components.append(
-            {
-                "path": str(prim.GetPath()),
-                "type": str(data.dtype),
-                "samples": int(data.shape[0]),
-                "size": int(data.shape[1]),
-                "extent": int(data.shape[2]),
-                "bin": filepath,
-            }
+        headers.append(
+            Header.fromjson(
+                {
+                    "path": prim.GetPath(),
+                    "type": data.dtype,
+                    "samples": data.shape[0],
+                    "size": data.shape[1],
+                    "extent": data.shape[2],
+                    "bin": filepath,
+                }
+            )
         )
-    jsondata = {
-        "usd": usdfile,
-        "components": components,
-    }
+    package = Package(usdfile, headers)
     filepath = f"{outdir}/{os.path.basename(usdfile)}.json"
-    jsonstr = json.dumps(jsondata)
     with open(filepath, "w") as f:
-        f.write(jsonstr)
-    return parse_json(jsonstr)
+        json.dump(package.tojson(), f)
+    return package
