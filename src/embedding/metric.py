@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import math
+from typing import Optional
 
 # Various metrics that take two same-shape ndarrays interpreted as
 #     (nsamples, nvertices, ndim)
@@ -25,27 +26,80 @@ def box_range(A: np.ndarray) -> np.ndarray:
     return upper - lower
 
 
-# TODO: compute Hausdorff taking topology into account.
-def point_hausdorff(A: np.ndarray, B: np.ndarray) -> float:
+def difference(A: np.ndarray, B: Optional[np.ndarray] = None) -> np.ndarray:
+    """
+    Return the difference matrix, after checking:
+    1. if B is None, just return A
+    2. if A and B have different shape, raise a ValueError
+    """
+    if B is None:
+        return A
+    if A.shape != B.shape:
+        raise ValueError(f"Array shapes {A.shape} and {B.shape} differ")
+    return A - B
+
+
+def point_hausdorff(A: np.ndarray, B: Optional[np.ndarray] = None) -> float:
     """
     Return the largest L2 distance between vertices that match index and timestep.
 
     This is the Hausdorff metric for a point cloud.
     """
-    if A.shape != B.shape:
-        raise ValueError(f"Array shapes {A.shape} and {B.shape} differ")
-    diff = A - B
+    diff = difference(A, B)
     dist2 = np.vecdot(diff, diff)
     return math.sqrt(np.max(dist2))
 
 
-def Linf(A: np.ndarray, B: np.ndarray) -> float:
+def Linf(A: np.ndarray, B: Optional[np.ndarray] = None) -> float:
     """
     Return the largest coordinate-wise distance between two arrays.
 
     This is also known as L_infinity
     """
-    if A.shape != B.shape:
-        raise ValueError(f"Array shapes {A.shape} and {B.shape} differ")
-    diff = A - B
+    diff = difference(A, B)
     return float(np.fabs(diff).max())
+
+
+def numdifferent(A: np.ndarray, B: Optional[np.ndarray] = None) -> int:
+    """
+    Return the number of values that differ.
+    """
+    diff = difference(A, B)
+    return np.count_nonzero(diff)
+
+
+class Report:
+    def __init__(self, predata: np.ndarray, postdata: np.ndarray, compressed_size: int):
+        # Sizes in bytes.
+        self.original_size = predata.itemsize * predata.size
+        self.compressed_size = compressed_size
+        self.original_numvalues = predata.size
+
+        self.range = box_range(predata)
+
+        # Compute the errors.
+        errors = predata - postdata
+
+        # Compute some metrics.
+        self.hausdorff = point_hausdorff(errors)
+        self.Linf = Linf(errors)
+
+        # Verify: can we get precisely lossless results?
+        corrected = postdata + errors
+        self.corrected_Linf = Linf(predata, corrected)
+        self.numuncorrectable = numdifferent(predata, corrected)
+
+    def print_report(self):
+        compression_ratio = 1 - self.compressed_size / self.original_size
+        print(
+            f"{self.original_size} reduced to {self.compressed_size}: {compression_ratio:.2%} reduction"
+        )
+        range_string = " ".join(f"{x:.2f}" for x in self.range)
+        print(f"Range: {range_string}")
+        print(f"Hausdorff (pointwise): {self.hausdorff}")
+        print(f"Linf: {self.Linf}")
+        print(f"Linf after error-correct: {self.corrected_Linf}")
+        uncorrectable_ratio = self.numuncorrectable / self.original_numvalues
+        print(
+            f"{self.numuncorrectable} uncorrectable entries; {uncorrectable_ratio:.2%} of entries"
+        )

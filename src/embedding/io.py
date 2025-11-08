@@ -10,8 +10,7 @@ import re
 
 from typing import Any, Optional, Iterable, Union
 from numpy.typing import DTypeLike
-from embedding import embedding
-from embedding import clustering
+from embedding import embedding, clustering, metric
 
 # Inputs:
 #       .json -- provides nsamples, type, size, extent for all properties
@@ -229,7 +228,7 @@ def separate_usd(usdfile: str, outdir: str, verbose: bool = False) -> Package:
 
 def create_embedding(
     header: Header, quality: float = 0.999, clustersize: int = 10000, verbose=False
-) -> list[str]:
+) -> tuple[str, str, str]:
     """
     Create an embedding for the specific property.
 
@@ -275,4 +274,35 @@ def create_embedding(
     if verbose:
         print(f"  wrote {clusterfilesize + headerfilesize + projectedfilesize} bytes")
 
-    return [headersbin, projectedbin, clusterbin]
+    return (headersbin, projectedbin, clusterbin)
+
+
+def read_embedding(
+    header: Header, files: tuple[str, str, str], verbose: bool = False
+) -> np.ndarray:
+    """
+    Read an embedding and output the reconstructed data.
+    """
+    (headersbin, projectedbin, clusterbin) = files
+
+    # Read the clusters
+    with open(clusterbin, "rb") as f:
+        (cover, _) = clustering.Covering.from_bytes(f.read())
+
+    # Read the headers and projections, start offsets at zero for the future loop.
+    with open(headersbin, "rb") as f:
+        headeroff = 0
+        headerbytes = f.read()
+    with open(projectedbin, "rb") as f:
+        projectedoff = 0
+        projectedbytes = f.read()
+
+    # Read the embedded data and invert it back to the original domain.
+    slices: list[np.ndarray] = []
+    for _ in range(cover.nsubsets):
+        (embed, headeroff) = embedding.deserialize(headerbytes, headeroff)
+        (projected, projectedoff) = embed.read_projection(projectedbytes, projectedoff)
+        slices.append(embed.invert(projected))
+
+    # The data is now sliced up, unslice it.
+    return clustering.unslice(slices, cover, header.extent)
