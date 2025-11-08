@@ -153,7 +153,7 @@ def unslice(slices: list[np.ndarray], cover: Covering, ndim: int) -> np.ndarray:
     if ndata % ndim != 0:
         raise ValueError(f"Data is not {ndim}-dimensional: shape {flattened.shape}")
     nverts = ndata // ndim
-    byvertex = np.reshape(flattened, shape=(nsamples, nverts, ndim))
+    byvertex = flattened.reshape((nsamples, nverts, ndim))
 
     # Check if we need to reorder
     if not cover.is_id_permutation():

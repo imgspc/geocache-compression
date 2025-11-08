@@ -56,5 +56,8 @@ INSTALL(TARGETS
         abc-combine
         abc-compare
 )
+
+# Install only the python files that need to be alongside the binary files.
+# TODO: figure out how to properly install the python module.
 INSTALL(PROGRAMS abc-separate.py abc-combine.py
         TYPE BIN)

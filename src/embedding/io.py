@@ -6,6 +6,7 @@ import numpy as np
 import os
 import struct
 import sys
+import re
 
 from typing import Any, Optional, Iterable, Union
 from numpy.typing import DTypeLike
@@ -21,15 +22,37 @@ from embedding import clustering
 class Header:
     def __init__(
         self,
+        objpath: str,
         floatsize: int,
         extent: int,
         size: int,
         nsamples: int,
+        binpath: str = "",
     ):
         self.floatsize = floatsize
         self.extent = extent
         self.size = size
         self.nsamples = nsamples
+        self.path = objpath
+        if binpath:
+            self.binpath = binpath
+        else:
+            self.binpath = re.sub(r"[-./ ()]", "-", objpath).strip("-")
+
+    def matches(self, name: str) -> bool:
+        """
+        Does the name match this header?
+
+        It can match the object path, or it can match the binary filename (only
+        the basename needs to match).
+        """
+        if name == self.path:
+            return True
+        if name == self.binpath:
+            return True
+        if os.path.basename(name) == os.path.basename(name):
+            return True
+        return False
 
     def verify_shape(self, f: np.ndarray) -> None:
         """
@@ -47,7 +70,19 @@ class Header:
         return f"{self.extent} float{self.floatsize}_t per point, {self.size} points, {self.nsamples} samples"
 
 
-def read_file(binfile: str, header: Header) -> np.ndarray:
+class Package:
+    def __init__(self, inputfile: str, headers: list[Header]):
+        self.inputfile = inputfile
+        self.headers = headers
+
+    def get_header(self, key: str) -> Header:
+        for header in self.headers:
+            if header.matches(key):
+                return header
+        raise KeyError(f"{key} not found in package for {self.inputfile}")
+
+
+def read_binfile(header: Header) -> np.ndarray:
     """
     Read the file into an row-major array structured with nsamples rows and size columns,
     each column being an extent-tuple of floatsize values.
@@ -62,47 +97,113 @@ def read_file(binfile: str, header: Header) -> np.ndarray:
             nptype = np.float64
         case _:
             raise ValueError(
-                f"can't handle type float{header.floatsize}_t parsing {binfile}"
+                f"can't handle type float{header.floatsize} parsing {header.binpath}"
             )
 
     # datatype is that each sample row is a matrix of size rows by extent columns
     dtype = np.dtype((nptype, (header.size, header.extent)))
 
     # return the entire file, parsed into one array with shape (nsamples, size, extent)
-    return np.fromfile(binfile, dtype=dtype)
+    return np.fromfile(header.binpath, dtype=dtype)
 
 
-def parse_json(jsonfile: str, binfile: str) -> Header:
+def parse_json(jsonstr: str) -> Package:
     """
-    Given a json file describing the ABC file, and a binary file, report the
-    details needed to form the header and parse the binary file.
+    Parse the json string and convert it to a Package (basically, a list of Headers).
 
-    Raises KeyError if binfile isn't associated with a property in the ABC file.
+    See parse_json_file if you have a file path.
     """
-    binbasename = os.path.basename(binfile)
+    parsed_json = json.loads(jsonstr)
+
+    def make_header(component) -> Header:
+        float_type = component["type"]
+        if isinstance(float_type, int):
+            floatsize = float_type
+        else:
+            match float_type:
+                case "float16" | "float16_t":
+                    floatsize = 16
+                case "float32" | "float32_t":
+                    floatsize = 32
+                case "float64" | "float64_t":
+                    floatsize = 64
+                case _:
+                    component_name = component["path"]
+                    raise ValueError(
+                        f"unhandled type {float_type} for {component_name}"
+                    )
+        return Header(
+            objpath=component["path"],
+            floatsize=floatsize,
+            extent=component["extent"],
+            size=component["size"],
+            nsamples=component["samples"],
+            binpath=component["bin"],
+        )
+
+    headers = [make_header(component) for component in parsed_json["components"]]
+    filename = ""
+    if "abc" in parsed_json:
+        filename = parsed_json["abc"]
+    elif "usd" in parsed_json:
+        filename = parsed_json["usd"]
+    return Package(filename, headers)
+
+
+def parse_json_file(jsonfile: str) -> Package:
     with open(jsonfile) as f:
-        parsed_json = json.load(f)
+        data = f.read()
+    return parse_json(data)
 
-    # Look up the components, find the one where 'bin' matches binfile by basename.
-    # Report that. Ignore the dirname.
-    for component in parsed_json["components"]:
-        if component["bin"] == binbasename:
-            float_type = component["type"]
-            if isinstance(float_type, int):
-                floatsize = float_type
-            elif float_type == "float16_t":
-                floatsize = 16
-            elif float_type == "float32_t":
-                floatsize = 32
-            elif float_type == "float64_t":
-                floatsize = 64
-            else:
-                raise ValueError(f"unhandled type {float_type} for {binbasename}")
-            return Header(
-                floatsize=floatsize,
-                extent=component["extent"],
-                size=component["size"],
-                nsamples=component["samples"],
-            )
-    # If we are here then we didn't find the file.
-    raise KeyError(f"no property has 'bin' matching {binbasename}")
+
+def separate_usd(usdfile: str, outdir: str) -> Package:
+    """
+    Separate out a USD file and return the resulting package.
+
+    Also writes the relevant .bin and .json files.
+
+    Requires `pip install usd-core`
+    """
+    # Import here so we can use the rest without USD being installed.
+    # USD doesn't yet have official type stubs as of usd-core 25.11
+    from pxr import Usd, UsdGeom, Sdf  # type: ignore
+
+    stage = Usd.Stage.Open(usdfile)
+
+    components = []
+    for prim in stage.Traverse():
+        if not prim.IsA(UsdGeom.Mesh):
+            continue
+        mesh = UsdGeom.Mesh(prim)
+        attr = mesh.GetPointsAttr()
+        if attr.GetVariability() != Sdf.VariabilityVarying:
+            continue
+        if attr.GetNumTimeSamples() == 0:
+            continue
+        times = attr.GetTimeSamples()
+        data = np.array([attr.Get(t) for t in times])
+        print(f"{prim.GetPath()} {data.shape} {data.dtype}")
+        filename = re.sub(r"[-./ ()]", "-", str(prim.GetPath())).strip("-")
+        filepath = f"{outdir}/{filename}.bin"
+        print(filepath)
+        with open(filepath, "wb") as f:
+            f.write(data.tobytes())
+        components.append(
+            {
+                "path": str(prim.GetPath()),
+                "type": str(data.dtype),
+                "samples": int(data.shape[0]),
+                "size": int(data.shape[1]),
+                "extent": int(data.shape[2]),
+                "bin": filepath,
+            }
+        )
+    jsondata = {
+        "usd": usdfile,
+        "components": components,
+    }
+    filepath = f"{outdir}/{os.path.basename(usdfile)}.json"
+    jsonstr = json.dumps(jsondata)
+    with open(filepath, "w") as f:
+        f.write(jsonstr)
+    return parse_json(jsonstr)
