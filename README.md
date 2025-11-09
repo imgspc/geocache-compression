@@ -54,6 +54,16 @@ python ../install/bin/abc-combine.py --verbose octopus.json out.abc
 
 That parses an .abc file, separates out all the properties into their own .bin files, combines them, and compares the results.
 
+## Developing
+
+We use clang-format and black for formatting; and mypy for type checking the Python code.
+```
+pip install mypy black
+sh pre-submit.sh
+```
+
+Pre-submit reformats all the C++ and Python code it can find, and typechecks Python.
+
 ## Testing
 
 Good idea for later.
