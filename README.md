@@ -1,7 +1,7 @@
 # Geocache Compression
 
 This is a research project aiming to explore how to compress animated geocache
-files, e.g. Alembic files.
+files, e.g. Alembic files or USD vertex caches.
 
 The overall idea is:
 * Each coordinate is a time series, so use time series compression. E.g. Guerra et all 2025: https://arxiv.org/pdf/2412.16266
@@ -9,14 +9,29 @@ The overall idea is:
 * In particular, figure out how to reduce dimension, e.g. with clustering and dimensionality reduction techniques.
 * Use the Academy Software Foundation's DPEL and the alembic octopus for sample data
 
-The target is SIGGRAPH 2026.
+The target is SIGGRAPH 2026 or maybe eurographics.
 
-## Building
+## USD
 
-First, install [Alembic 1.8.8](https://github.com/alembic/alembic) (or probably most any other version). I installed
-it in `~/projects/alembic-install` but it doesn't matter, you just have to know
-where you put it.
+Initial tests are with the [ALab](https://github.com/DigitalProductionExampleLibrary/ALab) project. Note: the script to install everything doesn't seem to work on Windows. Works fine on macos and likely on linux.
 
+Open the [Jupyter notebook](https://github.com/imgspc/geocache-compression/blob/main/src/usd-separate.ipynb) and follow the directions in the first cell.
+
+### Running for USD
+
+After following the instructions in the Jupyter notebook, you'll be in Jupyter. Hit Shift-enter to execute each of the cells and see what happens.
+
+Then play around.
+
+Restart the kernel when you change the code in src/embedding.
+
+## Alembic
+
+Initial tests are with the ancient `Alembic_Octopus_Example.tgz` from the [google code downloads page](https://code.google.com/archive/p/alembic/downloads).
+
+First, install [Alembic 1.8.8](https://github.com/alembic/alembic) (or probably most any other version). Note: you must install it with HDF5 support, and you must install the ILM math program (which gives float16 support). On macos, I was able to `brew install hdf5 imath` and let the cmake files find it all.
+
+Then to build geocache-compression:
 ```
 export ALEMBIC_ROOT=$HOME/projects/alembic-install
 mkdir build
@@ -26,15 +41,9 @@ cmake ../src -DCMAKE_INSTALL_PREFIX=`pwd`/../install
 make install
 ```
 
-## Testing
+### Running Alembic
 
-Good idea for later.
-
-## Running
-
-Download `Alembic_Octopus_Example.tgz` from the [google code downloads page](https://code.google.com/archive/p/alembic/downloads) into your downloads folder and unzip it in place. To use it, you need to have built Alembic with HDF5 support (which is not the default), since the example is ancient.
-
-Full loop. Run this from the build directory (so you can clean it out easily).
+Run this from the build directory of this (so you can clean it out easily).
 ```
 cd build
 ../install/bin/abc-parse ~/Downloads/Alembic_Octopus_Example/alembic_octopus.abc > octopus.json
@@ -44,6 +53,10 @@ python ../install/bin/abc-combine.py --verbose octopus.json out.abc
 ```
 
 That parses an .abc file, separates out all the properties into their own .bin files, combines them, and compares the results.
+
+## Testing
+
+Good idea for later.
 
 ## Links
 
