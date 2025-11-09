@@ -100,7 +100,7 @@ class Header:
             objpath=str(component["path"]),
             floatsize=floatsize,
             extent=int(component["extent"]),
-            size=int(component["size"]),
+            size=int(component["size"] if "size" in component else 1),
             nsamples=int(component["samples"]),
             binpath=str(component["bin"]),
         )
@@ -318,3 +318,26 @@ def read_embedding(
 
     # The data is now sliced up, unslice it.
     return clustering.unslice(slices, cover, header.extent)
+
+
+def run_single_report(
+    header: Header, clustersize: int, quality: float, verbose: bool = False
+) -> metric.Report:
+    files = create_embedding(header, clustersize=clustersize, quality=quality)
+    size = sum(os.path.getsize(path) for path in files)
+    predata = read_binfile(header)
+    postdata = read_embedding(header, files)
+    r = metric.Report(predata, postdata, size)
+    compression_ratio = 1 - r.compressed_size / r.original_size
+    if verbose:
+        print(f"{compression_ratio: 5.2%} | {r.original_size} | {header.path}")
+    return r
+
+
+def run_all_reports(
+    package: Package, clustersize: int, quality: float, verbose: bool = False
+) -> dict[str, metric.Report]:
+    return {
+        header.path: run_single_report(header, clustersize, quality, verbose)
+        for header in package.headers
+    }

@@ -63,8 +63,7 @@ class Covering:
             yield self.indices[self.offsets[i] : self.offsets[i + 1]]
         # Return the last cluster if any
         last_offset = self.offsets[-1]
-        if last_offset < len(self.indices) - 1:
-            yield self.indices[last_offset : len(self.indices)]
+        yield self.indices[last_offset : len(self.indices)]
 
     @staticmethod
     def from_arrays(subsets: Sequence[Sequence[int]]):
