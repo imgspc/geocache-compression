@@ -239,12 +239,24 @@ def separate_usd(usdfile: str, outdir: str, verbose: bool = False) -> Package:
 
 
 def create_embedding(
-    header: Header, quality: float = 0.999, clustersize: int = 10000, verbose=False
+    header: Header,
+    quality: float = 0.999,
+    verbose=False,
+    cluster_fn=clustering.cluster_by_index,
+    **kwargs,
 ) -> tuple[str, str, str]:
     """
     Create an embedding for the specific property.
 
     Return the names of all the binary files created.
+
+    Any arguments beyond quality, verbose, and cluster_fn are passed to the clustering function.
+
+    cluster_fn must take as its first parameter the data, an ndarray
+    with shape (nsamples, nverts, ndim); after that, it may require or
+    optionally accept more arguments in the kwargs.
+
+    Passing invalid kwargs will raise a TypeError.
     """
     if verbose:
         print(f"reducing dimension of {header}")
@@ -256,7 +268,7 @@ def create_embedding(
         print(f"  read {data.size * data.itemsize} bytes")
 
     # Form the clusters
-    cover = clustering.cluster_by_index(header.size, clustersize)
+    cover = cluster_fn(data, **kwargs)
     if verbose:
         print(f"  created {cover.nsubsets} clusters")
 
@@ -321,9 +333,13 @@ def read_embedding(
 
 
 def run_single_report(
-    header: Header, clustersize: int, quality: float, verbose: bool = False
+    header: Header,
+    quality: float,
+    cluster_fn=clustering.cluster_by_index,
+    verbose: bool = False,
+    **kwargs,
 ) -> metric.Report:
-    files = create_embedding(header, clustersize=clustersize, quality=quality)
+    files = create_embedding(header, quality=quality, cluster_fn=cluster_fn, **kwargs)
     size = sum(os.path.getsize(path) for path in files)
     predata = read_binfile(header)
     postdata = read_embedding(header, files)
@@ -335,9 +351,13 @@ def run_single_report(
 
 
 def run_all_reports(
-    package: Package, clustersize: int, quality: float, verbose: bool = False
+    package: Package,
+    quality: float,
+    cluster_fn=clustering.cluster_by_index,
+    verbose: bool = False,
+    **kwargs,
 ) -> dict[str, metric.Report]:
     return {
-        header.path: run_single_report(header, clustersize, quality, verbose)
+        header.path: run_single_report(header, quality, cluster_fn, verbose, **kwargs)
         for header in package.headers
     }

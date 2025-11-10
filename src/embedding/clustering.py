@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import struct
+import math
 
 from typing import Iterator, Sequence, cast
 
@@ -66,21 +67,28 @@ class Covering:
         yield self.indices[last_offset : len(self.indices)]
 
     @staticmethod
-    def from_arrays(subsets: Sequence[Sequence[int]]):
+    def from_indices_and_counts(indices: np.ndarray, counts: np.ndarray) -> Covering:
+        """
+        Given an array of indices and an array of counts per cluster,
+        return the covering.
+
+        TODO: check that it's actually a covering.
+        """
+        # The first offset is zero, and the offset of the end of the array
+        # doesn't need to be stored.
+        offsets = np.concatenate([[0], counts.cumsum()[:-1]])
+
+        return Covering(indices, offsets)
+
+    @staticmethod
+    def from_arrays(subsets: Sequence[Sequence[int]]) -> Covering:
         """
         Given a sequence of sequences of int, store them, and be able to serialize
         and deserialize them.
         """
         indices = np.concatenate(subsets)
-
-        # Get lengths of everything but the last subset.
-        lengths = np.array([len(subset) for subset in subsets[:-1]], dtype=int)
-
-        # Get start offsets of each subset. The first start offset is zero,
-        # then len(subset[0]), then len(subset[0] + subset[1]), etc.
-        offsets = np.concatenate([[0], lengths.cumsum()], dtype=int)
-
-        return Covering(indices, offsets)
+        lengths = np.array([len(subset) for subset in subsets], dtype=int)
+        return Covering.from_indices_and_counts(indices, lengths)
 
     @staticmethod
     def from_bytes(b: bytes, offset: int = 0) -> tuple[Covering, int]:
@@ -154,40 +162,54 @@ def unslice(slices: list[np.ndarray], cover: Covering, ndim: int) -> np.ndarray:
 
     # Check if we need to reorder
     if not cover.is_id_permutation():
-        raise ValueError("Reordering covers is not yet supported")
+        byvertex = byvertex[:, cover.indices, :]
 
     return byvertex
 
 
-def cluster_by_vertex(n: int) -> Covering:
+def cluster_by_index(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     """
-    Return a covering that just has each vertex one by one.
-    """
+    Given data of shape (nsamples, nverts, ndim), return a covering of the
+    vertices based just on indices.
 
-    def array(i: int) -> Sequence[int]:
-        return cast(Sequence[int], np.array([i], dtype=int))
-
-    return Covering.from_arrays([array(i) for i in range(n)])
-
-
-def cluster_monolithic(n: int) -> Covering:
-    """
-    Return a monolithic covering: all in one big cluster.
-    """
-
-    def array(i: int) -> Sequence[int]:
-        return cast(Sequence[int], np.array(range(n), dtype=int))
-
-    return Covering.from_arrays([array(n)])
-
-
-def cluster_by_index(n: int, k: int) -> Covering:
-    """
     Cluster every group of k vertices together, as if index adjacency meant
     they were close in behaviour.
     """
     # The indices are just all the vertices one after the other.
     # The offsets start at 0, and go up in steps of 10.
-    indices = np.array(range(n))
-    offsets = indices[0:n:k]
+    (nsamples, nverts, ndim) = data.shape
+    indices = np.arange(nverts)
+    offsets = indices[0:nverts:cluster_size]
     return Covering(indices, offsets)
+
+
+def cluster_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
+    """
+    Given data of shape (nsamples, nverts, ndim), return a covering of the
+    vertices based on k-means for k clusters.
+
+    k is computed as ceil(nverts / cluster_size). TODO: do this more rationally.
+
+    Clustering is based on the distance between the motion curves relative to
+    their centroids.
+    """
+    from sklearn.cluster import KMeans  # type: ignore
+
+    (nsamples, nverts, ndim) = data.shape
+
+    # Translate each curve center to the origin
+    centroid = data.sum(axis=0) / nsamples
+    M = data - centroid
+
+    # Reorder to have row per vertex, each row is xyzxyzxyz... motion curves.
+    byvertex = M.transpose((1, 0, 2))
+    flattened = byvertex.reshape(nverts, nsamples * ndim)
+
+    # Run k-means.
+    k = int(math.ceil(nverts / cluster_size))
+    kmeans = KMeans(n_clusters=k).fit(flattened)
+
+    # Convert to a Covering
+    indices = kmeans.labels_.argsort()
+    _, counts = np.unique(kmeans.labels_, return_counts=True)
+    return Covering.from_indices_and_counts(indices, counts)
