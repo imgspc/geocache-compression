@@ -207,7 +207,10 @@ class PCAEmbedding(Embedding):
             count = k
         elif isinstance(k, float) and k > 0 and k < 1:
             # find the number of components needed to explain more than k of the variance
-            running_sum = s.cumsum() / s.sum()
+            # note: don't use running_sum = s.cumsum() / s.sum() because roundoff can make
+            # the last cumulative sum be significantly different than the sum.
+            running_sum = s.cumsum()
+            running_sum = running_sum[:-1] / running_sum[-1]
             count = 1 + running_sum.searchsorted(k)
             if verbose:
                 print(f"chose {count} dimensions among {running_sum}")

@@ -29,6 +29,17 @@ class Covering:
         """
         self.indices = indices.astype(np.uint32)
         self.offsets = offsets.astype(np.uint32)
+        self.verify()
+
+    def verify(self) -> None:
+        # Verify that the indices are unique and cover the range.
+        s = np.unique(self.indices)
+        if len(s) != len(self.indices):
+            raise ValueError(f"non-unique indices: {len(s)} out of {len(self.indices)}")
+        if s[0] != 0:
+            raise ValueError(f"least index is {s[0]}")
+        if s[-1] != len(s) - 1:
+            raise ValueError(f"largest index is {s[-1]} not {len(s)-1}")
 
     @property
     def nsubsets(self) -> int:
@@ -161,10 +172,12 @@ def unslice(slices: list[np.ndarray], cover: Covering, ndim: int) -> np.ndarray:
     byvertex = flattened.reshape((nsamples, nverts, ndim))
 
     # Check if we need to reorder
-    if not cover.is_id_permutation():
-        byvertex = byvertex[:, cover.indices, :]
-
-    return byvertex
+    if cover.is_id_permutation():
+        return byvertex
+    else:
+        # Reorder. Compute the inverse permutation and apply it.
+        inverse_permutation = np.argsort(cover.indices)
+        return byvertex[:, inverse_permutation, :]
 
 
 def cluster_by_index(data: np.ndarray, cluster_size: int = 10000) -> Covering:
