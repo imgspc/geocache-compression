@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import math
 from typing import Optional
+import functools
 
 # Various metrics that take two same-shape ndarrays interpreted as
 #     (nsamples, nvertices, ndim)
@@ -60,14 +61,6 @@ def Linf(A: np.ndarray, B: Optional[np.ndarray] = None) -> float:
     return float(np.fabs(diff).max())
 
 
-def numdifferent(A: np.ndarray, B: Optional[np.ndarray] = None) -> int:
-    """
-    Return the number of values that differ.
-    """
-    diff = difference(A, B)
-    return np.count_nonzero(diff)
-
-
 class Report:
     def __init__(
         self,
@@ -80,19 +73,41 @@ class Report:
         self.compressed_size = compressed_size
         self.original_numvalues = predata.size
 
-        self.range = box_range(predata)
-
         # Compute the errors.
         errors = predata - postdata
 
         # Compute some metrics.
         self.hausdorff = point_hausdorff(errors)
         self.Linf = Linf(errors)
+        self.numerrors = np.count_nonzero(predata != postdata)
 
         # Verify: can we get precisely lossless results?
         corrected = postdata + errors
         self.corrected_Linf = Linf(predata, corrected)
-        self.numuncorrectable = numdifferent(predata, corrected)
+        self.numuncorrectable = np.count_nonzero(predata != corrected)
+
+    @staticmethod
+    def combine_reports(reports: list[Report]) -> Report:
+        empty = np.zeros((1, 1, 1), dtype=np.float32)
+        output = Report(empty, empty, 0)
+
+        def combine(field: str, method) -> None:
+            value = method([getattr(r, field) for r in reports])
+            setattr(output, field, value)
+
+        # Mirror the __init__ here.
+        combine("original_size", sum)
+        combine("compressed_size", sum)
+        combine("original_numvalues", sum)
+
+        combine("hausdorff", max)
+        combine("Linf", max)
+        combine("numerrors", sum)
+
+        combine("corrected_Linf", max)
+        combine("numuncorrectable", sum)
+
+        return output
 
     def print_report(self, metersPerUnit: float):
         mpu = metersPerUnit
@@ -100,10 +115,11 @@ class Report:
         print(
             f"{self.original_size} reduced to {self.compressed_size}: {compression_ratio:.2%} reduction"
         )
-        range_string = " ".join(f"{x:.2f}" for x in self.range * mpu)
-        print(f"Range: {range_string} m")
         print(f"Hausdorff (pointwise): {self.hausdorff * mpu} m")
         print(f"Linf: {self.Linf * mpu} m")
+        print(
+            f"Errors: {self.numerrors} ({self.numerrors / self.original_numvalues:.2%})"
+        )
         print(f"Linf after error-correct: {self.corrected_Linf * mpu} m")
         uncorrectable_ratio = self.numuncorrectable / self.original_numvalues
         print(
