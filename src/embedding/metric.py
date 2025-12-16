@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import math
-from typing import Optional
+from typing import Optional, Union
 import functools
 
 # Various metrics that take two same-shape ndarrays interpreted as
@@ -87,9 +87,12 @@ class Report:
         self.numuncorrectable = np.count_nonzero(predata != corrected)
 
     @staticmethod
-    def combine_reports(reports: list[Report]) -> Report:
+    def combine_reports(reports: Union[dict[str, Report], list[Report]]) -> Report:
         empty = np.zeros((1, 1, 1), dtype=np.float32)
         output = Report(empty, empty, 0)
+
+        if isinstance(reports, dict):
+            reports = list(reports.values())
 
         def combine(field: str, method) -> None:
             value = method([getattr(r, field) for r in reports])
@@ -109,9 +112,13 @@ class Report:
 
         return output
 
+    @property
+    def compression_ratio(self):
+        return 1 - self.compressed_size / self.original_size
+
     def print_report(self, metersPerUnit: float):
         mpu = metersPerUnit
-        compression_ratio = 1 - self.compressed_size / self.original_size
+        compression_ratio = self.compression_ratio
         print(
             f"{self.original_size} reduced to {self.compressed_size}: {compression_ratio:.2%} reduction"
         )
