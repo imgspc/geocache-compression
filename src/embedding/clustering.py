@@ -226,3 +226,83 @@ def cluster_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     indices = kmeans.labels_.argsort()
     _, counts = np.unique(kmeans.labels_, return_counts=True)
     return Covering.from_indices_and_counts(indices, counts)
+
+
+def cluster_pca_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
+    """
+    Given data of shape (nsamples, nverts, ndim), return a covering of the
+    vertices based on k-means for k clusters over the PCA of each motion curve.
+
+    k is computed as ceil(nverts / cluster_size). TODO: do this more rationally.
+    """
+    from sklearn.cluster import KMeans  # type: ignore
+
+    (nsamples, nverts, ndim) = data.shape
+
+    # Translate each curve center to the origin
+    centroid = data.sum(axis=0) / nsamples
+    M = data - centroid
+
+    # for each vertex, compute the PCA basis (the 3x3 orthonormal matrix)
+    def get_vertex_curve(i):
+        return M[:, i, :]
+
+    def get_pca_basis(curve):
+        U, s, Vt = np.linalg.svd(curve, full_matrices=False)
+        return Vt
+
+    # shape: each row is a 3x3 matrix. Convert to each row is a 9-vector.
+    pcas = np.array([get_pca_basis(get_vertex_curve(i)) for i in range(nverts)])
+    flattened = pcas.reshape(nverts, ndim * ndim)
+    k = int(math.ceil(nverts / cluster_size))
+    kmeans = KMeans(n_clusters=k).fit(flattened)
+
+    # Convert to a Covering
+    indices = kmeans.labels_.argsort()
+    _, counts = np.unique(kmeans.labels_, return_counts=True)
+    return Covering.from_indices_and_counts(indices, counts)
+
+
+def cluster_static_first(
+    data: np.ndarray, cluster_size: int = 10000, cluster_fn=cluster_by_index
+) -> Covering:
+    """
+    Given data of shape (nsamples, nverts, ndim), return a covering
+    with a first cluster being all the points that don't move at all,
+    followed by covering the remaining vertices using some other
+    cluster functions (default: by index).
+    """
+    (nsamples, nverts, ndim) = data.shape
+
+    # Figure out which vertices go into the first cluster, namely those with
+    # static values by vertex. (Would be nice actually to get static values *by coordinate*
+    # so motion along flat ground doesn't need to encode the elevation at all).
+    initial_positions = data[0, :, :]
+    coord_values_are_initial = data == initial_positions
+    coord_values_are_static = np.all(coord_values_are_initial, axis=0)
+    vertex_values_are_static = np.any(coord_values_are_static, axis=1)
+
+    # we want the indices where the vertices are static versus moving
+    static_indices = np.nonzero(vertex_values_are_static)[0]
+
+    # Check two extreme cases: all vertices move, or none move.
+    if len(static_indices) == 0:
+        return cluster_fn(data, cluster_size)
+    elif len(static_indices) == nverts:
+        return Covering(np.arange(nverts), np.array([0]))
+
+    # cluster just the moving data, which will have indices refer to the view.
+    moving_indices = np.nonzero(np.invert(vertex_values_are_static))[0]
+    moving_data = data[:, moving_indices, :]
+    moving_data_covering = cluster_fn(moving_data, cluster_size)
+
+    # build the indices and offsets of the moving data covering,
+    # in the original indexing.
+    mdc_indices = moving_indices[moving_data_covering.indices]
+    mdc_offsets = len(static_indices) + moving_data_covering.offsets
+
+    # Create a covering object that starts with the static cluster and then
+    # has the sub-covering, in the original indexing.
+    indices = np.concatenate((static_indices, mdc_indices))
+    offsets = np.concatenate(([0], mdc_offsets))
+    return Covering(indices, offsets)
