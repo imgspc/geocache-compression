@@ -334,10 +334,13 @@ def run_single_report(
     header: Header,
     quality: float,
     cluster_fn=clustering.cluster_by_index,
+    embed_fn=embedding.PCAEmbedding.from_data,
     verbose: bool = False,
     **kwargs,
 ) -> metric.Report:
-    files = create_embedding(header, quality=quality, cluster_fn=cluster_fn, **kwargs)
+    files = create_embedding(
+        header, quality=quality, embed_fn=embed_fn, cluster_fn=cluster_fn, **kwargs
+    )
     size = sum(os.path.getsize(path) for path in files)
     predata = read_binfile(header)
     postdata = read_embedding(header, files)
@@ -352,10 +355,18 @@ def run_all_reports(
     package: Package,
     quality: float,
     cluster_fn=clustering.cluster_by_index,
+    embed_fn=embedding.PCAEmbedding.from_data,
     verbose: bool = False,
     **kwargs,
 ) -> dict[str, metric.Report]:
     return {
-        header.path: run_single_report(header, quality, cluster_fn, verbose, **kwargs)
+        header.path: run_single_report(
+            header,
+            quality=quality,
+            cluster_fn=cluster_fn,
+            embed_fn=embed_fn,
+            verbose=verbose,
+            **kwargs,
+        )
         for header in package.headers
     }
