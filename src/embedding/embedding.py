@@ -8,6 +8,7 @@ import math
 from .util import pack_small_uint, unpack_small_uint, pack_dtype, unpack_dtype
 
 from typing import Union, Optional
+from numpy.typing import DTypeLike
 
 #
 # This file includes the generic Embeddings we've developed, in a class
@@ -260,6 +261,7 @@ class PCAEmbedding(Embedding):
         The U array is not serialized, so calling `project` after deserializing
         will not give the identical result due to roundoff.
         """
+        assert self.c.dtype == self.WVt.dtype
         return b"".join(
             (
                 pack_small_uint(self.n),
@@ -375,8 +377,17 @@ class RoundedPCAEmbedding(PCAEmbedding):
             # Once the eps vector is chosen, note that rounding s can zero out some entries entirely,
             # achieving dimensionality reduction.
             #
-            # Do all the math in float64 otherwise we get float32 roundoff breaking everything.
-            s1 = np.array(s, dtype=np.float64) + 1
+
+            # Given the s1^2, we need to do the math here in higher precision.
+            higher: DTypeLike
+            match data.dtype:
+                case np.float16:
+                    higher = np.float32
+                case np.float32:
+                    higher = np.float64
+                case _:
+                    higher = np.longdouble
+            s1 = np.array(s, dtype=higher) + higher(1)  # type: ignore
             s1s1 = s1 * s1 + (4 * alpha / min_d)
             s1s1_sqrt = np.sqrt(s1s1)
             eps = 0.5 * (s1s1_sqrt - s1)
@@ -394,14 +405,18 @@ class RoundedPCAEmbedding(PCAEmbedding):
                 U = np.array(U[:, 0:count], copy=True)
                 eps = np.array(eps[0:count], copy=True)
 
+            if verbose or not verbose:
+                print(
+                    f"{n} samples, {m} coordinates, projected to {count} dims: {M.size} reduced to {WVt.size} + {U.size} ({(WVt.size + U.size)/M.size:.2%})"
+                )
 
             # Now, round the matrices.
             # U we divide each row component-wise by eps, round, then multiply back out by eps
             # WVt we do that to the transpose to operate on each column component-wise
             #
-            # Make sure to save as float32 in the end.
-            U = np.array(np.round(U / eps) * eps, dtype=np.float32)
-            WVt = np.array((np.round(WVt.T / eps) * eps).T, dtype=np.float32)
+            # Make sure to save as the original data size.
+            U = np.array(np.round(U / eps) * eps, dtype=data.dtype)
+            WVt = np.array((np.round(WVt.T / eps) * eps).T, dtype=data.dtype)
 
         embedding = PCAEmbedding(n, m, count, c, WVt)
         embedding.U = U
