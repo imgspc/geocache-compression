@@ -242,6 +242,7 @@ def create_embedding(
     header: Header,
     quality: float = 0.999,
     verbose=False,
+    embed_fn=embedding.PCAEmbedding.from_data,
     cluster_fn=clustering.cluster_by_index,
     **kwargs,
 ) -> tuple[str, str, str]:
@@ -274,10 +275,7 @@ def create_embedding(
 
     # TODO: parallelize the computation.
     clusters = list(clustering.slice(data, cover))
-    embeddings = [
-        embedding.PCAEmbedding.from_data(cluster, quality, verbose=verbose)
-        for cluster in clusters
-    ]
+    embeddings = [embed_fn(cluster, quality, verbose=verbose) for cluster in clusters]
 
     basename = os.path.splitext(header.binpath)[0]
     headersbin = basename + ".embed-header.bin"

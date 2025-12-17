@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import numpy as np
 import struct
+import math
 
 from .util import pack_small_uint, unpack_small_uint, pack_dtype, unpack_dtype
 
@@ -168,17 +169,11 @@ class PCAEmbedding(Embedding):
         self.WVtInv: Optional[np.ndarray] = None
 
     @staticmethod
-    def from_data(
-        data: Domain, k: Union[int, float] = 0, verbose: bool = False
-    ) -> PCAEmbedding:
+    def from_data(data: Domain, quality: float, verbose: bool = False) -> PCAEmbedding:
         """
         Perform PCA on the data, which must have shape (n, m).
 
-        If k is a float in (0, 1) then use as many components as needed to
-        explain that fraction of variance. If k is an integer, use that many
-        components. If k is 0 or is at least min(n, m), use all of the components.
-
-        We mildly assume n > m. It'll work otherwise but won't be efficient.
+        Quality should be in [0,1]
         """
         if len(data.shape) != 2:
             raise ValueError(f"Shape {data.shape} should be a matrix")
@@ -201,22 +196,20 @@ class PCAEmbedding(Embedding):
         U, s, Vt = np.linalg.svd(M, full_matrices=False)
 
         # Dimensionality reduction: Keep the most significant values only.
-        if k == 0:
+        if quality == 1:
             count = min(data.shape)
-        elif isinstance(k, int) and k >= 1:
-            count = k
-        elif isinstance(k, float) and k > 0 and k < 1:
+        elif quality >= 0 and quality < 1:
             # find the number of components needed to explain more than k of the variance
             # note: don't use running_sum = s.cumsum() / s.sum() because roundoff can make
             # the last cumulative sum be significantly different than the sum.
             running_sum = s.cumsum()
             running_sum = running_sum[:-1] / running_sum[-1]
-            count = 1 + running_sum.searchsorted(k)
+            count = 1 + running_sum.searchsorted(quality)
             if verbose:
                 print(f"chose {count} dimensions among {running_sum}")
         else:
             raise ValueError(
-                f"invalid value {k} ({type(k)}) should be zero, a float in (0,1) or a positive int"
+                f"invalid value {quality} ({type(quality)}) should be zero or a float in (0,1)"
             )
 
         # No dimensionality reduction? Store the whole thing
@@ -298,7 +291,7 @@ class PCAEmbedding(Embedding):
         WVt = np.reshape(WVt_flat, (k, m))
         offset += tsize * k * m
 
-        return (PCAEmbedding(n, m, k, c, WVt), offset)
+        return (cls(n, m, k, c, WVt), offset)
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
         t = self.c.dtype
@@ -307,6 +300,112 @@ class PCAEmbedding(Embedding):
         offset += t.itemsize * self.k * self.n
 
         return (U, offset)
+
+
+class RoundedPCAEmbedding(PCAEmbedding):
+    @staticmethod
+    def from_data(data: Domain, quality: float, verbose: bool = False) -> PCAEmbedding:
+        """
+        Perform PCA on the data, which must have shape (n, m).
+
+        Guarantee that the error in any single value is at most "quality";
+        lower quality is better.
+        """
+        if len(data.shape) != 2:
+            raise ValueError(f"Shape {data.shape} should be a matrix")
+        (n, m) = data.shape
+        if not n or not m:
+            raise ValueError(f"Empty matrix with shape {data.shape}")
+        min_d = min(n, m)
+
+        alpha = quality
+        if alpha < 0:
+            raise ValueError(f"invalid quality {quality}")
+
+        # Translate the data to the origin. Round to the nearest alpha.
+        c = np.sum(data, axis=0) / n
+        c = np.round(c / alpha) * alpha
+        M = data - c
+
+        # Perform SVD:
+        # Vt is the pseudo-rotation to the SVD basis (transpose of V, historical reasons)
+        # W is the scaling matrix -- we only store the diagonal s.
+        # U is the data rewritten in the SVD basis (it is, itself, semi-orthogonal).
+        # The svd algorithm guarantees s is returned in order largest scale first.
+        #
+        # We can't assume M is hermitian, so we need the full computation.
+        # We definitely need U and V.
+        # We don't want the full matrices, they'd be huge.
+        U, s, Vt = np.linalg.svd(M, full_matrices=False)
+
+        if alpha == 0:
+            count = min_d
+            WVt = np.diag(s) @ Vt
+        else:
+            # Round off to U', W', Vt' so that M' = U'W'Vt' and ||M-M'||_inf < alpha.
+            # U and V are rotations so the rows are unit vectors.
+            # W is a diagonal matrix with non-negative values, in order biggest first.
+            # M = U W Vt
+            # M_ij = sum_k U_ik W_kk Vt_kj
+            # M_ij = sum_k U_ik s_k Vt_kj
+            #
+            # We will choose a vector eps of roundoff values as follows:
+            # * every entry in the jth column of U rounds to the nearest multiple of eps_j
+            # * every entry in the ith row of WVt rounds to the nearest multiple of eps_i
+            #
+            # This ensures that every term that involves a value of W has the same error bounds:
+            #
+            # TODO: verify interval arithmetic here:
+            # M'_ij = sum_k [(U_ik +- eps_k) (s_k Vt_kj +- eps_k)]
+            #       = sum_k [U_ik s_k Vt_kj +- eps_k (s_k Vt_kj + U_ik) +- eps_k^2]
+            #
+            # The overall error in a component of the reconstruction, M', is thus:
+            # |M_ij - M'_ij| = |sum_k [U_ik s_k Vt_kj - U_ik s_k Vt_kj +- eps_k (s_k Vt_kj + U_ik) +- eps_k^2]|
+            #                = |sum_k [                                +- eps_k (s_k Vt_kj + U_ik) +- eps_k^2]|
+            # Given that U_i and Vt_k are unit vectors this is bounded by:
+            #             <= sum_k |eps_k (s_k + 1)| + eps_k^2
+            # To ensure the error is at most alpha, then, it suffices to choose eps to satisfy:
+            #       alpha >= sum_k eps_k (s_k + 1) + eps_k^2
+            # Allowing each component of eps to have equal weight (and requiring they are positive):
+            #       alpha / min(data.shape) == eps_k (s_k + 1) + eps_k^2
+            # solve for eps_k:
+            #       eps_k = [-(s_k+1) + sqrt((s_k+1)^2 + 4 alpha/min(data.shape))] / 2
+            # Note that eps_k is strictly positive, so we can divide by it safely.
+            #
+            # Once the eps vector is chosen, note that rounding s can zero out some entries entirely,
+            # achieving dimensionality reduction.
+            #
+            # Do all the math in float64 otherwise we get float32 roundoff breaking everything.
+            s1 = np.array(s, dtype=np.float64) + 1
+            s1s1 = s1 * s1 + (4 * alpha / min_d)
+            s1s1_sqrt = np.sqrt(s1s1)
+            eps = 0.5 * (s1s1_sqrt - s1)
+
+            # Round s to see if we can achieve dimensionality reduction.
+            # s' = eps * round(s / eps) ; but no need to keep s'
+            count = np.count_nonzero(np.round(s / eps))
+
+            if count == min_d:
+                WVt = np.diag(s) @ Vt
+            else:
+                # Drop the zero-rounded values by dropping:
+                # row/col from W, rows from Vt, columns from U, and values from eps
+                WVt = np.diag(s[0:count]) @ Vt[0:count, :]
+                U = np.array(U[:, 0:count], copy=True)
+                eps = np.array(eps[0:count], copy=True)
+
+
+            # Now, round the matrices.
+            # U we divide each row component-wise by eps, round, then multiply back out by eps
+            # WVt we do that to the transpose to operate on each column component-wise
+            #
+            # Make sure to save as float32 in the end.
+            U = np.array(np.round(U / eps) * eps, dtype=np.float32)
+            WVt = np.array((np.round(WVt.T / eps) * eps).T, dtype=np.float32)
+
+        embedding = PCAEmbedding(n, m, count, c, WVt)
+        embedding.U = U
+        return embedding
 
 
 _classmap.register(1, PCAEmbedding)
