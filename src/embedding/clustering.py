@@ -188,6 +188,14 @@ def unslice(slices: list[np.ndarray], cover: Covering, ndim: int) -> np.ndarray:
         return byvertex[:, inverse_permutation, :]
 
 
+def _get_vertex_curve(M: np.ndarray, i: int) -> np.ndarray:
+    """
+    Given an array of shape (nsamples, nverts, ndim), get back a matrix
+    of shape (nsamples, ndim) representing the motion of the ith vertex.
+    """
+    return M[:, i, :]
+
+
 def cluster_by_index(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     """
     Given data of shape (nsamples, nverts, ndim), return a covering of the
@@ -250,15 +258,12 @@ def cluster_pca_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     M = data - centroid
 
     # for each vertex, compute the PCA basis (the 3x3 orthonormal matrix)
-    def get_vertex_curve(i):
-        return M[:, i, :]
-
     def get_pca_basis(curve):
         U, s, Vt = np.linalg.svd(curve, full_matrices=False)
         return Vt
 
     # shape: each row is a 3x3 matrix. Convert to each row is a 9-vector.
-    pcas = np.array([get_pca_basis(get_vertex_curve(i)) for i in range(nverts)])
+    pcas = np.array([get_pca_basis(_get_vertex_curve(M, i)) for i in range(nverts)])
     flattened = pcas.reshape(nverts, ndim * ndim)
     k = int(math.ceil(nverts / cluster_size))
     kmeans = KMeans(n_clusters=k).fit(flattened)
@@ -267,6 +272,87 @@ def cluster_pca_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     indices = kmeans.labels_.argsort()
     _, counts = np.unique(kmeans.labels_, return_counts=True)
     return Covering.from_indices_and_counts(indices, counts)
+
+
+def _lineanglemetric(l1: np.ndarray, l2: np.ndarray) -> float:
+    """
+    Given two lines, each going through the origin and heading to points l1 and
+    l2 respectively, compute a metric related to the angle between the lines.
+    If the angle is theta, we return:
+        (1 - cos(theta)) / 2
+    This is 0 for parallel lines and 1 for perpendicular lines.
+
+    Either l1 or l2 or both can be an array of lines, one line per row.
+
+    If both l1 and l2 are single lines, we return the scalar distance.
+    If either l1 or l2 is a single line while the other is an array of lines, we return a vector of distances.
+    If both are arrays of lines, we return a matrix where entry i,j is the distance from l1[i] to l2[j].
+    """
+    dot = l1 @ l2.T
+    return 1 - dot * dot
+
+
+def _cluster_near_values(
+    data: np.ndarray, epsilon: float, converter, metric
+) -> Covering:
+    """
+    Given data of shape (nsamples, nverts, ndim), convert each vertex to a
+    vector via the converter, then find cluster centres so that every vertex's
+    vector is within distance epsilon or less to at least one cluster centre,
+    according to the metric.
+
+    This is quite slow: O(nverts * nclusters)
+
+    converter: np.ndarray -> T
+        # convert a motion curve to some type (usually np.ndarray)
+    metric: T * T -> float
+        # either side or both may be an array of T (as an np.ndarray)
+    """
+    (nsamples, nverts, ndim) = data.shape
+    centroid = data.sum(axis=0) / nsamples
+    M = data - centroid
+
+    # converted is an array with a row per vertex, and values that depend on the converter.
+    # the 'metric' had better be a metric over the space spanned by the converter
+    converted = np.array([converter(_get_vertex_curve(M, i)) for i in range(nverts)])
+
+    # Create clusters. Start with one centre, and keep adding centres until all
+    # vertices have distance less than epsilon to at least one centre.
+    centres = [converted[0]]
+    best_distances = metric(converted[0], converted)
+
+    while np.max(best_distances) > epsilon:
+        index = np.argmax(best_distances)
+        centres.append(converted[index])
+        newdist = metric(centres[-1], converted)
+        best_distances = np.minimum(best_distances, newdist)
+
+    # Assign each vertex to a cluster.
+    # all_distances[i,j] is the distance from vertex i to centre j
+    # labels[i] is the index of the closest centre to vertex i
+    all_distances = metric(converted, np.array(centres))
+    labels = np.argmin(all_distances, axis=1)
+
+    return Covering.from_labels(labels)
+
+
+def cluster_first_axis(data: np.ndarray, cluster_size: int = 10000) -> Covering:
+    """
+    Given data of shape (nsamples, nverts, ndim), return a covering of the
+    vertices based on having similar angles between the principal component axes
+    of each motion curve in each cluster.
+
+    TODO: give a way to choose the #degrees.
+    """
+    degrees = 10
+    epsilon = (1 - math.cos(math.radians(degrees))) / 2
+
+    def get_axis(curve: np.ndarray) -> np.ndarray:
+        U, s, Vt = np.linalg.svd(curve, full_matrices=False)
+        # Compute e1 @ Vt ... which is the first row of Vt:
+        return Vt[0]
+
+    return _cluster_near_values(data, epsilon, get_axis, _lineanglemetric)
 
 
 def cluster_near_quaternions(data: np.ndarray, cluster_size: int = 10000) -> Covering:
@@ -279,44 +365,13 @@ def cluster_near_quaternions(data: np.ndarray, cluster_size: int = 10000) -> Cov
     """
     from scipy.spatial.transform import Rotation
 
-    (nsamples, nverts, ndim) = data.shape
-
-    degrees = 2
+    degrees = 10
     epsilon = (1 - math.cos(math.radians(degrees))) / 2
 
-    def qdist(q1: np.ndarray, q2: np.ndarray):
-        """
-        Quaternion distance metric: 1 - (q1.q2)^2
-
-        This yields (1-cos(theta)) / 2 but without any trig operations.
-        Distance is 0 if the quaternions are equal, and 1 if the two are 180
-        degrees apart.
-
-        q1 may be a single quaternion or a matrix with a quaternion per row
-        q2 may be a single quaternion or a matrix with a quaternion per row
-
-        Returns:
-        * a single distance if both q1 and q2 are single quaternions
-        * a vector of distances if one if a single quaternion and the other is a matrix
-        * a matrix of distances if both q1 and q2 are matrixes of quaternions
-        """
-        dot = q1 @ q2.T
-        return 1 - dot * dot
-
-    # Translate each curve center to the origin
-    centroid = data.sum(axis=0) / nsamples
-    M = data - centroid
-
-    # for each vertex, compute a 3x3 rotation
-    # TODO: do this in one fell swoop rather than vertex by vertex
-    def get_vertex_curve(i: int) -> np.ndarray:
-        return M[:, i, :]
-
-    def get_rotation(curve: np.ndarray) -> np.ndarray:
+    def get_quat(curve: np.ndarray) -> np.ndarray:
         U, s, Vt = np.linalg.svd(curve, full_matrices=False)
         # If Vt isn't 3x3 then make it 3x3. The singular values are sorted,
-        # so keeping the first three dimensions keeps the best ones. And to
-        # add dimensions, we just add the identity.
+        # so keeping the first three dimensions keeps the best ones.
         (n, m) = Vt.shape
         if (n, m) != (3, 3):
             if (n >= 3) and (m >= 3):
@@ -330,39 +385,16 @@ def cluster_near_quaternions(data: np.ndarray, cluster_size: int = 10000) -> Cov
                 )
 
         # Vt may have negative determinant (rotoreflection, rather than rotation).
-        # If so, negating the 3x3 matrix will negate the determinant and let us continue.
-        # TODO: make this make sense for what we're doing
+        # If so, negating the last row will flip the sign and make a pure rotation,
+        # with as little impact as possible since that affects the least
+        # principal component.
+        # TODO: make this make geometric sense.
         if np.linalg.det(Vt) < 0:
-            return -Vt
-        return Vt
-
-    def get_quat(R: np.ndarray) -> np.ndarray:
-        r = Rotation.from_matrix(R)
+            Vt[-1, :] = -Vt[-1, :]
+        r = Rotation.from_matrix(Vt)
         return r.as_quat()
 
-    def get_vertex_quat(i: int) -> np.ndarray:
-        return get_quat(get_rotation(get_vertex_curve(i)))
-
-    quaternions = np.array([get_vertex_quat(i) for i in range(nverts)])
-
-    # Keep adding centres until all quaternions are max epsilon from a centre.
-    # Time is nverts * len(centres); TODO: use a search structure to speed up.
-    centres = [quaternions[0]]
-    best_distances = qdist(centres[0], quaternions)
-
-    while np.max(best_distances) > epsilon:
-        index = np.argmax(best_distances)
-        centres.append(quaternions[index])
-        newdist = qdist(centres[-1], quaternions)
-        best_distances = np.minimum(best_distances, newdist)
-
-    # Assign each vertex to a cluster.
-    # all_distances[i,j] is the distance from quaternion i to centre j
-    # labels[i] is the index of the closest centre to quaternion i
-    all_distances = qdist(quaternions, np.array(centres))
-    labels = np.argmin(all_distances, axis=1)
-
-    return Covering.from_labels(labels)
+    return _cluster_near_values(data, epsilon, get_quat, _lineanglemetric)
 
 
 def cluster_static_first(
