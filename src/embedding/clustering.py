@@ -82,14 +82,22 @@ class Covering:
         """
         Given an array of indices and an array of counts per cluster,
         return the covering.
-
-        TODO: check that it's actually a covering.
         """
         # The first offset is zero, and the offset of the end of the array
         # doesn't need to be stored.
         offsets = np.concatenate([[0], counts.cumsum()[:-1]])
 
         return Covering(indices, offsets)
+
+    @staticmethod
+    def from_labels(labels: np.ndarray) -> Covering:
+        """
+        Given a vector where labels[i] is the number of the cluster for
+        vertex i, return the covering.
+        """
+        indices = labels.argsort()
+        _, counts = np.unique(labels, return_counts=True)
+        return Covering.from_indices_and_counts(indices, counts)
 
     @staticmethod
     def from_arrays(subsets: Sequence[Sequence[int]]) -> Covering:
@@ -223,9 +231,7 @@ def cluster_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     kmeans = KMeans(n_clusters=k).fit(flattened)
 
     # Convert to a Covering
-    indices = kmeans.labels_.argsort()
-    _, counts = np.unique(kmeans.labels_, return_counts=True)
-    return Covering.from_indices_and_counts(indices, counts)
+    return Covering.from_labels(kmeans.labels_)
 
 
 def cluster_pca_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
@@ -261,6 +267,102 @@ def cluster_pca_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     indices = kmeans.labels_.argsort()
     _, counts = np.unique(kmeans.labels_, return_counts=True)
     return Covering.from_indices_and_counts(indices, counts)
+
+
+def cluster_near_quaternions(data: np.ndarray, cluster_size: int = 10000) -> Covering:
+    """
+    Given data of shape (nsamples, nverts, ndim), return a covering of the
+    vertices based on keeping the angle between quaternions and their cluster
+    centre less than 2 degrees.
+
+    TODO: give a way to choose the #degrees.
+    """
+    from scipy.spatial.transform import Rotation
+
+    (nsamples, nverts, ndim) = data.shape
+
+    degrees = 2
+    epsilon = (1 - math.cos(math.radians(degrees))) / 2
+
+    def qdist(q1: np.ndarray, q2: np.ndarray):
+        """
+        Quaternion distance metric: 1 - (q1.q2)^2
+
+        This yields (1-cos(theta)) / 2 but without any trig operations.
+        Distance is 0 if the quaternions are equal, and 1 if the two are 180
+        degrees apart.
+
+        q1 may be a single quaternion or a matrix with a quaternion per row
+        q2 may be a single quaternion or a matrix with a quaternion per row
+
+        Returns:
+        * a single distance if both q1 and q2 are single quaternions
+        * a vector of distances if one if a single quaternion and the other is a matrix
+        * a matrix of distances if both q1 and q2 are matrixes of quaternions
+        """
+        dot = q1 @ q2.T
+        return 1 - dot * dot
+
+    # Translate each curve center to the origin
+    centroid = data.sum(axis=0) / nsamples
+    M = data - centroid
+
+    # for each vertex, compute a 3x3 rotation
+    # TODO: do this in one fell swoop rather than vertex by vertex
+    def get_vertex_curve(i: int) -> np.ndarray:
+        return M[:, i, :]
+
+    def get_rotation(curve: np.ndarray) -> np.ndarray:
+        U, s, Vt = np.linalg.svd(curve, full_matrices=False)
+        # If Vt isn't 3x3 then make it 3x3. The singular values are sorted,
+        # so keeping the first three dimensions keeps the best ones. And to
+        # add dimensions, we just add the identity.
+        (n, m) = Vt.shape
+        if (n, m) != (3, 3):
+            if (n >= 3) and (m >= 3):
+                # Simple case: just drop values.
+                new_Vt = Vt[0:3, 0:3]
+                Vt = new_Vt
+            else:
+                # TODO
+                raise ValueError(
+                    f"unimplemented: converting shape {Vt.shape} to a rotation matrix"
+                )
+
+        # Vt may have negative determinant (rotoreflection, rather than rotation).
+        # If so, negating the 3x3 matrix will negate the determinant and let us continue.
+        # TODO: make this make sense for what we're doing
+        if np.linalg.det(Vt) < 0:
+            return -Vt
+        return Vt
+
+    def get_quat(R: np.ndarray) -> np.ndarray:
+        r = Rotation.from_matrix(R)
+        return r.as_quat()
+
+    def get_vertex_quat(i: int) -> np.ndarray:
+        return get_quat(get_rotation(get_vertex_curve(i)))
+
+    quaternions = np.array([get_vertex_quat(i) for i in range(nverts)])
+
+    # Keep adding centres until all quaternions are max epsilon from a centre.
+    # Time is nverts * len(centres); TODO: use a search structure to speed up.
+    centres = [quaternions[0]]
+    best_distances = qdist(centres[0], quaternions)
+
+    while np.max(best_distances) > epsilon:
+        index = np.argmax(best_distances)
+        centres.append(quaternions[index])
+        newdist = qdist(centres[-1], quaternions)
+        best_distances = np.minimum(best_distances, newdist)
+
+    # Assign each vertex to a cluster.
+    # all_distances[i,j] is the distance from quaternion i to centre j
+    # labels[i] is the index of the closest centre to quaternion i
+    all_distances = qdist(quaternions, np.array(centres))
+    labels = np.argmin(all_distances, axis=1)
+
+    return Covering.from_labels(labels)
 
 
 def cluster_static_first(
