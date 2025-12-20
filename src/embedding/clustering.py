@@ -4,7 +4,7 @@ import numpy as np
 import struct
 import math
 
-from typing import Iterator, Sequence, cast
+from typing import Iterator, Sequence, Callable
 
 
 #
@@ -196,6 +196,16 @@ def _get_vertex_curve(M: np.ndarray, i: int) -> np.ndarray:
     return M[:, i, :]
 
 
+def cluster_monolithic(data: np.ndarray, cluster_size: int = 0) -> Covering:
+    """
+    Just make one big cluster.
+    """
+    (nsamples, nverts, ndim) = data.shape
+    indices = np.arange(nverts)
+    offsets = np.zeros(1)
+    return Covering(indices, offsets)
+
+
 def cluster_by_index(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     """
     Given data of shape (nsamples, nverts, ndim), return a covering of the
@@ -293,7 +303,10 @@ def _lineanglemetric(l1: np.ndarray, l2: np.ndarray) -> float:
 
 
 def _cluster_near_values(
-    data: np.ndarray, epsilon: float, converter, metric
+    data: np.ndarray,
+    epsilon: float,
+    converter: Callable[[np.ndarray], np.ndarray],
+    metric: Callable[[np.ndarray, np.ndarray], float],
 ) -> Covering:
     """
     Given data of shape (nsamples, nverts, ndim), convert each vertex to a
@@ -316,10 +329,14 @@ def _cluster_near_values(
     # the 'metric' had better be a metric over the space spanned by the converter
     converted = np.array([converter(_get_vertex_curve(M, i)) for i in range(nverts)])
 
+    # for the seed, concatenate all the vertex curves into one,
+    # and act like that's one vertex with lots of samples.
+    seed = converter(np.reshape(M, (nsamples * nverts, ndim)))
+
     # Create clusters. Start with one centre, and keep adding centres until all
     # vertices have distance less than epsilon to at least one centre.
-    centres = [converted[0]]
-    best_distances = metric(converted[0], converted)
+    centres = [seed]
+    best_distances = metric(centres[0], converted)
 
     while np.max(best_distances) > epsilon:
         index = np.argmax(best_distances)
@@ -344,7 +361,7 @@ def cluster_first_axis(data: np.ndarray, cluster_size: int = 10000) -> Covering:
 
     TODO: give a way to choose the #degrees.
     """
-    degrees = 10
+    degrees = 30
     epsilon = (1 - math.cos(math.radians(degrees))) / 2
 
     def get_axis(curve: np.ndarray) -> np.ndarray:
@@ -365,7 +382,7 @@ def cluster_near_quaternions(data: np.ndarray, cluster_size: int = 10000) -> Cov
     """
     from scipy.spatial.transform import Rotation
 
-    degrees = 10
+    degrees = 30
     epsilon = (1 - math.cos(math.radians(degrees))) / 2
 
     def get_quat(curve: np.ndarray) -> np.ndarray:
