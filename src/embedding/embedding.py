@@ -141,6 +141,53 @@ def deserialize(b: bytes, offset: int = 0) -> tuple[Embedding, int]:
     return cls.from_bytes(b, offset)
 
 
+class RawEmbedding(Embedding):
+    """
+    Ceci n'est pas un embedding.
+
+    This is just the identity; we store the data, and do nothing with it.
+    """
+
+    __slots__ = ["nsamples", "nverts", "ndim"]
+
+    def __init__(self, n: int, m: int, dtype):
+        self.n = n
+        self.m = m
+        self.dtype = dtype
+
+    def project(self, data: Domain) -> Reduced:
+        return data
+
+    def invert(self, data: Reduced) -> Domain:
+        return data
+
+    def tobytes(self) -> bytes:
+        return b"".join(
+            (
+                pack_small_uint(self.n),
+                pack_small_uint(self.m),
+                pack_dtype(self.dtype),
+            )
+        )
+
+    @classmethod
+    def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
+        (n, offset) = unpack_small_uint(b, offset)
+        (m, offset) = unpack_small_uint(b, offset)
+        (t, offset) = unpack_dtype(b, offset)
+        assert issubclass(t, np.number)
+        return (RawEmbedding(n, m, t), offset)
+
+    def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
+        ndata = self.n * self.m
+        flatdata = np.frombuffer(b, offset=offset, dtype=self.dtype, count=ndata)
+        tsize = flatdata.itemsize
+        offset += tsize * ndata
+
+        data = np.reshape(flatdata, (self.n, self.m))
+        return (data, offset)
+
+
 class PCAEmbedding(Embedding):
     """
     Embedding based on PCA.
@@ -407,7 +454,7 @@ class RoundedPCAEmbedding(PCAEmbedding):
 
             if verbose or not verbose:
                 print(
-                    f"{n} samples, {m} coordinates, projected to {count} dims: {M.size} reduced to {WVt.size} + {U.size} ({(WVt.size + U.size)/M.size:.2%})"
+                    f"{data.shape}, projected to {WVt.shape}: {M.size} reduced to {WVt.size} + {U.size} ({(WVt.size + U.size)/M.size:.2%})"
                 )
 
             # Now, round the matrices.
@@ -423,4 +470,18 @@ class RoundedPCAEmbedding(PCAEmbedding):
         return embedding
 
 
-_classmap.register(1, PCAEmbedding)
+def embed_or_raw(data: Domain, quality: float, verbose: bool = False) -> Embedding:
+    embedded = RoundedPCAEmbedding.from_data(data, quality=quality, verbose=verbose)
+    n, m = data.shape
+    raw = RawEmbedding(n, m, data.dtype)
+    pcabytes = len(embedded.tobytes()) + len(embedded.project(data).tobytes())
+    rawbytes = len(raw.tobytes()) + len(raw.project(data).tobytes())
+    if pcabytes >= rawbytes:
+        if verbose: print(f"  stored raw as {rawbytes} rather than {pcabytes}")
+        return raw
+    else:
+        return embedded
+
+
+_classmap.register(1, RawEmbedding)
+_classmap.register(2, PCAEmbedding)
