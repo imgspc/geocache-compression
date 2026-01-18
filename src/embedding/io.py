@@ -313,7 +313,9 @@ def read_embedding(
     with open(clusterbin, "rb") as f:
         (cover, _) = clustering.Covering.from_bytes(f.read())
     if verbose:
-        print(f"Read cover with {cover.nsubsets} subsets and {len(cover.indices)} atoms")
+        print(
+            f"Read cover with {cover.nsubsets} subsets and {len(cover.indices)} atoms"
+        )
 
     # Read the headers and projections, start offsets at zero for the future loop.
     with open(headersbin, "rb") as f:
