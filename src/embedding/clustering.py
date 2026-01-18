@@ -7,6 +7,16 @@ import math
 from typing import Iterator, Sequence, Callable
 
 
+def _is_sorted(a: np.ndarray):
+    # is_sorted is somehow not a native operation, have to do this nonsense
+    #
+    # We are comparing component-wise whether the array except the last
+    # element is smaller than the array except the first element, creating
+    # a bool array for that, and return true if all are true.
+    #
+    return bool(np.all(a[:-1] <= a[1:]))
+
+
 #
 # This file has abstractions for creating clusterings, so that we can then
 # send data on to an embedding.
@@ -26,6 +36,9 @@ class Covering:
     def __init__(self, indices: np.ndarray, offsets: np.ndarray):
         """
         Use from_arrays or from_bytes instead.
+
+        The offsets array must *not* have 0 as the first index, or n-1 as the last index,
+        since those are implicitly assumed, saving 2 words.
         """
         self.indices = indices.astype(np.uint32)
         self.offsets = offsets.astype(np.uint32)
@@ -41,9 +54,25 @@ class Covering:
         if s[-1] != len(s) - 1:
             raise ValueError(f"largest index is {s[-1]} not {len(s)-1}")
 
+        # Verify the offsets are reasonable.
+        #
+        # An empty array of offsets is fine, it means we have just 1 monolithic
+        # cluster.
+        if len(self.offsets) != 0:
+            if self.offsets[0] == 0:
+                raise ValueError(f"Redundant first offset")
+            if self.offsets[-1] == len(self.indices):
+                raise ValueError(f"Redundant last offset")
+            if not _is_sorted(self.offsets):
+                raise ValueError(f"Offsets not in sorted order")
+            if np.any(self.offsets < 0):
+                raise ValueError(f"Negative offsets")
+            if np.any(self.offsets >= len(self.indices)):
+                raise ValueError(f"Offsets out of range")
+
     @property
     def nsubsets(self) -> int:
-        return len(self.offsets)
+        return 1 + len(self.offsets)
 
     def is_id_permutation(self) -> bool:
         """
@@ -57,25 +86,20 @@ class Covering:
             return False
         if self.indices[-1] != len(self.indices) - 1:
             return False
-
-        # is_sorted is somehow not a native operation, have to do this nonsense
-        #
-        # We are comparing component-wise whether the array except the last
-        # element is smaller than the array except the first element, creating
-        # a bool array for that, and return true if all are true.
-        #
-        return bool(np.all(self.indices[:-1] <= self.indices[1:]))
+        return _is_sorted(self.indices)
 
     @property
     def subsets(self) -> Iterator[np.ndarray]:
-        n = self.nsubsets
-        if n == 0:
+        # If we have just 1 subset it's all the indices:
+        if len(self.offsets) == 0:
+            yield self.indices
             return
-        for i in range(n - 1):
-            yield self.indices[self.offsets[i] : self.offsets[i + 1]]
-        # Return the last cluster if any
-        last_offset = self.offsets[-1]
-        yield self.indices[last_offset : len(self.indices)]
+
+        # We have an implicit 0 as first offset, and n as last offset.
+        yield self.indices[0 : self.offsets[0]]
+        for i in range(1, len(self.offsets)):
+            yield self.indices[self.offsets[i - 1] : self.offsets[i]]
+        yield self.indices[self.offsets[-1] : len(self.indices)]
 
     @staticmethod
     def from_indices_and_counts(indices: np.ndarray, counts: np.ndarray) -> Covering:
@@ -83,11 +107,13 @@ class Covering:
         Given an array of indices and an array of counts per cluster,
         return the covering.
         """
-        # The first offset is zero, and the offset of the end of the array
-        # doesn't need to be stored.
-        offsets = np.concatenate([[0], counts.cumsum()[:-1]])
-
-        return Covering(indices, offsets)
+        # Offsets are just the cumulative sum of counts.
+        # Skip the last cluster since it obviously goes to the end.
+        if len(counts) > 1:
+            offsets = counts[:-1].cumsum()
+            return Covering(indices, offsets)
+        else:
+            return Covering(indices, np.array([]))
 
     @staticmethod
     def from_labels(labels: np.ndarray) -> Covering:
@@ -126,8 +152,9 @@ class Covering:
         # Read the length of the offsets, then the offsets.
         noffsets = struct.unpack_from(">I", b, offset)[0]
         offset += 4
-        offsets = np.frombuffer(b, dtype=np.uint32, count=noffsets, offset=offset)
-        offset += noffsets * offsets.itemsize
+        if noffsets > 0:
+            offsets = np.frombuffer(b, dtype=np.uint32, count=noffsets, offset=offset)
+            offset += noffsets * offsets.itemsize
 
         return (Covering(indices, offsets), offset)
 
