@@ -477,7 +477,8 @@ def embed_or_raw(data: Domain, quality: float, verbose: bool = False) -> Embeddi
     pcabytes = len(embedded.tobytes()) + len(embedded.project(data).tobytes())
     rawbytes = len(raw.tobytes()) + len(raw.project(data).tobytes())
     if pcabytes >= rawbytes:
-        if verbose: print(f"  stored raw as {rawbytes} rather than {pcabytes}")
+        if verbose:
+            print(f"  stored raw as {rawbytes} rather than {pcabytes}")
         return raw
     else:
         return embedded
