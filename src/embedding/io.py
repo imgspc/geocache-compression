@@ -275,6 +275,8 @@ def create_embedding(
 
     # TODO: parallelize the computation.
     clusters = list(clustering.slice(data, cover))
+    assert len(clusters) == cover.nsubsets
+
     embeddings = [embed_fn(cluster, quality, verbose=verbose) for cluster in clusters]
 
     basename = os.path.splitext(header.binpath)[0]
@@ -310,6 +312,8 @@ def read_embedding(
     # Read the clusters
     with open(clusterbin, "rb") as f:
         (cover, _) = clustering.Covering.from_bytes(f.read())
+    if verbose:
+        print(f"Read cover with {cover.nsubsets} subsets and {len(cover.indices)} atoms")
 
     # Read the headers and projections, start offsets at zero for the future loop.
     with open(headersbin, "rb") as f:
