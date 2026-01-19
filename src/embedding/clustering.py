@@ -155,6 +155,8 @@ class Covering:
         if noffsets > 0:
             offsets = np.frombuffer(b, dtype=np.uint32, count=noffsets, offset=offset)
             offset += noffsets * offsets.itemsize
+        else:
+            offsets = np.array([], dtype=np.int32)
 
         return (Covering(indices, offsets), offset)
 
@@ -229,8 +231,7 @@ def cluster_monolithic(data: np.ndarray, cluster_size: int = 0) -> Covering:
     """
     (nsamples, nverts, ndim) = data.shape
     indices = np.arange(nverts)
-    offsets = np.zeros(1)
-    return Covering(indices, offsets)
+    return Covering.from_indices_and_counts(indices, np.array([len(indices)]))
 
 
 def cluster_by_index(data: np.ndarray, cluster_size: int = 10000) -> Covering:
@@ -242,10 +243,13 @@ def cluster_by_index(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     they were close in behaviour.
     """
     # The indices are just all the vertices one after the other.
-    # The offsets start at 0, and go up in steps of 10.
+    # We split the nverts as evenly as possible into nclusters, each of size
+    # k except the last one.
     (nsamples, nverts, ndim) = data.shape
+    nclusters = 1 + ((nverts - 1) // cluster_size)
+    k = int(round(nverts / nclusters))
     indices = np.arange(nverts)
-    offsets = indices[0:nverts:cluster_size]
+    offsets = indices[k:nverts:k]
     return Covering(indices, offsets)
 
 
@@ -383,18 +387,37 @@ def _cluster_near_values(
 def cluster_first_axis(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     """
     Given data of shape (nsamples, nverts, ndim), return a covering of the
-    vertices based on having similar angles between the principal component axes
-    of each motion curve in each cluster.
+    vertices based on having similar angles between main axis of the motion
+    curve in each cluster.
 
     TODO: give a way to choose the #degrees.
     """
-    degrees = 30
+    degrees = 10
     epsilon = (1 - math.cos(math.radians(degrees))) / 2
 
     def get_axis(curve: np.ndarray) -> np.ndarray:
         U, s, Vt = np.linalg.svd(curve, full_matrices=False)
         # Compute e1 @ Vt ... which is the first row of Vt:
         return Vt[0]
+
+    return _cluster_near_values(data, epsilon, get_axis, _lineanglemetric)
+
+
+def cluster_last_axis(data: np.ndarray, cluster_size: int = 10000) -> Covering:
+    """
+    Given data of shape (nsamples, nverts, ndim), return a covering of the
+    vertices based on having similar *least* significant axis.
+
+    In 3d data, this is a vector that describes the plane of the two *most*
+    significant axes, without caring which axis is principal.
+    """
+    degrees = 10
+    epsilon = (1 - math.cos(math.radians(degrees))) / 2
+
+    def get_axis(curve: np.ndarray) -> np.ndarray:
+        U, s, Vt = np.linalg.svd(curve, full_matrices=False)
+        # Compute e1 @ Vt ... which is the first row of Vt:
+        return Vt[-1]
 
     return _cluster_near_values(data, epsilon, get_axis, _lineanglemetric)
 
@@ -409,7 +432,7 @@ def cluster_near_quaternions(data: np.ndarray, cluster_size: int = 10000) -> Cov
     """
     from scipy.spatial.transform import Rotation
 
-    degrees = 30
+    degrees = 10
     epsilon = (1 - math.cos(math.radians(degrees))) / 2
 
     def get_quat(curve: np.ndarray) -> np.ndarray:
@@ -467,20 +490,23 @@ def cluster_static_first(
     if len(static_indices) == 0:
         return cluster_fn(data, cluster_size)
     elif len(static_indices) == nverts:
-        return Covering(np.arange(nverts), np.array([0]))
+        return Covering(np.arange(nverts), np.array([]))
 
     # cluster just the moving data, which will have indices refer to the view.
     moving_indices = np.nonzero(np.invert(vertex_values_are_static))[0]
     moving_data = data[:, moving_indices, :]
     moving_data_covering = cluster_fn(moving_data, cluster_size)
 
-    # build the indices and offsets of the moving data covering,
-    # in the original indexing.
+    # Build the indices and offsets of the moving data covering,
+    # in the original indexing. Make sure to add a 0 entry, to
+    # mark the barrier between the first cluster (static indices) and
+    # the mobile clusters.
     mdc_indices = moving_indices[moving_data_covering.indices]
-    mdc_offsets = len(static_indices) + moving_data_covering.offsets
+    mdc_offsets = len(static_indices) + np.concatenate(
+        [0], moving_data_covering.offsets
+    )
 
     # Create a covering object that starts with the static cluster and then
     # has the sub-covering, in the original indexing.
     indices = np.concatenate((static_indices, mdc_indices))
-    offsets = np.concatenate(([0], mdc_offsets))
-    return Covering(indices, offsets)
+    return Covering(indices, mdc_offsets)
