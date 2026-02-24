@@ -225,22 +225,30 @@ def _get_vertex_curve(M: np.ndarray, i: int) -> np.ndarray:
     return M[:, i, :]
 
 
-def cluster_monolithic(data: np.ndarray, cluster_size: int = 0) -> Covering:
+def cluster_monolithic(
+    data: np.ndarray, quality: float = 1e-6, cluster_size: int = 0
+) -> Covering:
     """
     Just make one big cluster.
+
+    quality and cluster size are ignored.
     """
     (nsamples, nverts, ndim) = data.shape
     indices = np.arange(nverts)
     return Covering.from_indices_and_counts(indices, np.array([len(indices)]))
 
 
-def cluster_by_index(data: np.ndarray, cluster_size: int = 10000) -> Covering:
+def cluster_by_index(
+    data: np.ndarray, quality: float, cluster_size: int = 10000
+) -> Covering:
     """
     Given data of shape (nsamples, nverts, ndim), return a covering of the
     vertices based just on indices.
 
     Cluster every group of k vertices together, as if index adjacency meant
     they were close in behaviour.
+
+    quality is ignored.
     """
     # The indices are just all the vertices one after the other.
     # We split the nverts as evenly as possible into nclusters, each of size
@@ -253,7 +261,9 @@ def cluster_by_index(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     return Covering(indices, offsets)
 
 
-def cluster_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
+def cluster_kmeans(
+    data: np.ndarray, quality: float, cluster_size: int = 10000
+) -> Covering:
     """
     Given data of shape (nsamples, nverts, ndim), return a covering of the
     vertices based on k-means for k clusters.
@@ -262,6 +272,8 @@ def cluster_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
 
     Clustering is based on the distance between the motion curves relative to
     their centroids.
+
+    quality is ignored.
     """
     from sklearn.cluster import KMeans  # type: ignore
 
@@ -283,12 +295,16 @@ def cluster_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
     return Covering.from_labels(kmeans.labels_)
 
 
-def cluster_pca_kmeans(data: np.ndarray, cluster_size: int = 10000) -> Covering:
+def cluster_pca_kmeans(
+    data: np.ndarray, quality: float, cluster_size: int = 10000
+) -> Covering:
     """
     Given data of shape (nsamples, nverts, ndim), return a covering of the
     vertices based on k-means for k clusters over the PCA of each motion curve.
 
     k is computed as ceil(nverts / cluster_size). TODO: do this more rationally.
+
+    quality is ignored.
     """
     from sklearn.cluster import KMeans  # type: ignore
 
@@ -335,7 +351,7 @@ def _lineanglemetric(l1: np.ndarray, l2: np.ndarray) -> float:
 
 def _cluster_near_values(
     data: np.ndarray,
-    epsilon: float,
+    quality: float,
     converter: Callable[[np.ndarray], np.ndarray],
     metric: Callable[[np.ndarray, np.ndarray], float],
 ) -> Covering:
@@ -353,6 +369,7 @@ def _cluster_near_values(
         # either side or both may be an array of T (as an np.ndarray)
     """
     (nsamples, nverts, ndim) = data.shape
+    epsilon = (1 - math.cos(quality)) / 2
     centroid = data.sum(axis=0) / nsamples
     M = data - centroid
 
@@ -384,56 +401,57 @@ def _cluster_near_values(
     return Covering.from_labels(labels)
 
 
-def cluster_first_axis(data: np.ndarray, cluster_size: int = 10000) -> Covering:
+def cluster_first_axis(
+    data: np.ndarray, quality: float = 1e-6, cluster_size: int = 10000
+) -> Covering:
     """
     Given data of shape (nsamples, nverts, ndim), return a covering of the
     vertices based on having similar angles between main axis of the motion
     curve in each cluster.
 
-    TODO: give a way to choose the #degrees.
+    Quality is interpreted as the angle / a distance on the unit sphere.
     """
-    degrees = 10
-    epsilon = (1 - math.cos(math.radians(degrees))) / 2
 
     def get_axis(curve: np.ndarray) -> np.ndarray:
         U, s, Vt = np.linalg.svd(curve, full_matrices=False)
         # Compute e1 @ Vt ... which is the first row of Vt:
         return Vt[0]
 
-    return _cluster_near_values(data, epsilon, get_axis, _lineanglemetric)
+    return _cluster_near_values(data, quality, get_axis, _lineanglemetric)
 
 
-def cluster_last_axis(data: np.ndarray, cluster_size: int = 10000) -> Covering:
+def cluster_last_axis(
+    data: np.ndarray, quality: float = 1e-6, cluster_size: int = 10000
+) -> Covering:
     """
     Given data of shape (nsamples, nverts, ndim), return a covering of the
     vertices based on having similar *least* significant axis.
 
     In 3d data, this is a vector that describes the plane of the two *most*
     significant axes, without caring which axis is principal.
+
+    Quality is interpreted as the angle / a distance on the unit sphere.
     """
-    degrees = 10
-    epsilon = (1 - math.cos(math.radians(degrees))) / 2
 
     def get_axis(curve: np.ndarray) -> np.ndarray:
         U, s, Vt = np.linalg.svd(curve, full_matrices=False)
         # Compute e1 @ Vt ... which is the first row of Vt:
         return Vt[-1]
 
-    return _cluster_near_values(data, epsilon, get_axis, _lineanglemetric)
+    return _cluster_near_values(data, quality, get_axis, _lineanglemetric)
 
 
-def cluster_near_quaternions(data: np.ndarray, cluster_size: int = 10000) -> Covering:
+def cluster_near_quaternions(
+    data: np.ndarray, quality: float = 1e-6, cluster_size: int = 10000
+) -> Covering:
     """
     Given data of shape (nsamples, nverts, ndim), return a covering of the
     vertices based on keeping the angle between quaternions and their cluster
-    centre less than 2 degrees.
+    centre low.
 
-    TODO: give a way to choose the #degrees.
+    The quality is interpreted the angle / a distance on the unit sphere.
     """
     from scipy.spatial.transform import Rotation
-
-    degrees = 10
-    epsilon = (1 - math.cos(math.radians(degrees))) / 2
 
     def get_quat(curve: np.ndarray) -> np.ndarray:
         U, s, Vt = np.linalg.svd(curve, full_matrices=False)
@@ -461,25 +479,33 @@ def cluster_near_quaternions(data: np.ndarray, cluster_size: int = 10000) -> Cov
         r = Rotation.from_matrix(Vt)
         return r.as_quat()
 
-    return _cluster_near_values(data, epsilon, get_quat, _lineanglemetric)
+    return _cluster_near_values(data, quality, get_quat, _lineanglemetric)
 
 
 def cluster_static_first(
-    data: np.ndarray, cluster_size: int = 10000, cluster_fn=cluster_by_index
+    data: np.ndarray,
+    quality: float = 1e-6,
+    cluster_size: int = 10000,
+    cluster_fn=cluster_by_index,
 ) -> Covering:
     """
     Given data of shape (nsamples, nverts, ndim), return a covering
     with a first cluster being all the points that don't move at all,
     followed by covering the remaining vertices using some other
     cluster functions (default: by index).
+
+    Not moving at all means that in all frames each component is within
+    distance `quality` of its average value over the frames.
+
+    Returns the covering, with the first cluster being the static vertices if possible.
     """
     (nsamples, nverts, ndim) = data.shape
 
     # Figure out which vertices go into the first cluster, namely those with
-    # static values by vertex. (Would be nice actually to get static values *by coordinate*
-    # so motion along flat ground doesn't need to encode the elevation at all).
+    # static values by vertex.
     initial_positions = data[0, :, :]
-    coord_values_are_initial = data == initial_positions
+    centroid = data.sum(axis=0) / nsamples
+    coord_values_are_initial = np.fabs(data - initial_positions) < quality
     coord_values_are_static = np.all(coord_values_are_initial, axis=0)
     vertex_values_are_static = np.any(coord_values_are_static, axis=1)
 
@@ -488,25 +514,30 @@ def cluster_static_first(
 
     # Check two extreme cases: all vertices move, or none move.
     if len(static_indices) == 0:
-        return cluster_fn(data, cluster_size)
+        return cluster_fn(data, quality, cluster_size)
     elif len(static_indices) == nverts:
-        return Covering(np.arange(nverts), np.array([]))
+        return Covering(np.arange(nverts), np.array([], dtype=int))
 
     # cluster just the moving data, which will have indices refer to the view.
     moving_indices = np.nonzero(np.invert(vertex_values_are_static))[0]
     moving_data = data[:, moving_indices, :]
-    moving_data_covering = cluster_fn(moving_data, cluster_size)
+    moving_data_covering = cluster_fn(moving_data, quality, cluster_size)
 
     # Build the indices and offsets of the moving data covering,
-    # in the original indexing. Make sure to add a 0 entry, to
-    # mark the barrier between the first cluster (static indices) and
-    # the mobile clusters.
+    # in the original indexing.
     mdc_indices = moving_indices[moving_data_covering.indices]
-    mdc_offsets = len(static_indices) + np.concatenate(
-        [0], moving_data_covering.offsets
-    )
+    mdc_offsets = moving_data_covering.offsets + len(static_indices)
 
     # Create a covering object that starts with the static cluster and then
     # has the sub-covering, in the original indexing.
-    indices = np.concatenate((static_indices, mdc_indices))
-    return Covering(indices, mdc_offsets)
+    indices = (
+        np.concatenate((static_indices, mdc_indices))
+        if len(mdc_indices)
+        else static_indices
+    )
+    offsets = (
+        np.concatenate([len(static_indices)], mdc_offsets)
+        if len(mdc_offsets)
+        else np.array([len(static_indices)])
+    )
+    return Covering(indices, offsets)

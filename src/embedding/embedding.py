@@ -188,6 +188,100 @@ class RawEmbedding(Embedding):
         return (data, offset)
 
 
+class StaticEmbedding(Embedding):
+    """
+    Embedding vertices that aren't moving.
+
+    We store the centroid, and that's what we return for all frames.
+
+    If the input is actually not static, then the errors are going to be
+    the distance from the actual data to the centroid. If that's a problem,
+    use another embedding!
+    """
+
+    def __init__(self, c: np.ndarray, n: int):
+        """
+        Most users will want to use `from_data` or `from_bytes` rather than directly
+        using the constructor.
+
+        c is the centroid, dimensions 1 x m
+        n is the number of rows in the original data
+        """
+        self.c = c
+        self.n = n
+
+    @staticmethod
+    def is_valid(data: Domain, quality: float) -> bool:
+        """
+        Is the data actually static?
+        """
+        (n, m) = data.shape
+        c = np.sum(data, axis=0) / n
+        M = data - c
+        return np.max(np.fabs(M)) <= quality
+
+    @staticmethod
+    def from_data(
+        data: Domain, quality: float, verbose: bool = False
+    ) -> StaticEmbedding:
+        """
+        Compute a static embedding from static data.
+
+        We do not check validity; use is_valid if you want that.
+        """
+        (n, m) = data.shape
+        c = np.sum(data, axis=0) / n
+        return StaticEmbedding(c, n)
+
+    def project(self, data: Domain) -> Reduced:
+        """
+        Project the data to the lower-dimensional space... which is 0-dimensional.
+        """
+        return np.array([], dtype=self.c.dtype)
+
+    def invert(self, data: Reduced) -> Domain:
+        """
+        Invert the lower-dimensional space (an empty vector) back to the original space,
+        i.e. return the centroid repeated every frame.
+        """
+        return np.tile(self.c, (self.n, 1))
+
+    def tobytes(self) -> bytes:
+        """
+        Write the matrix size, type, and centroid.
+        """
+        return b"".join(
+            (
+                pack_small_uint(self.n),
+                pack_small_uint(len(self.c)),
+                pack_dtype(self.c.dtype),
+                self.c.tobytes(),
+            )
+        )
+
+    @classmethod
+    def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
+        """
+        Read the matrix size, type, and centroid.
+        """
+        (n, offset) = unpack_small_uint(b, offset)
+        (m, offset) = unpack_small_uint(b, offset)
+        (t, offset) = unpack_dtype(b, offset)
+        assert issubclass(t, np.number)
+        c = np.frombuffer(b, offset=offset, dtype=t, count=m)
+        tsize = c.itemsize
+        offset += tsize * m
+        return (StaticEmbedding(c, n), offset)
+
+    def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
+        """
+        Read the projection to be inverted.
+
+        There is no projection: this reads nothing and returns an empty vector.
+        """
+        return np.array([], dtype=self.c.dtype), offset
+
+
 class PCAEmbedding(Embedding):
     """
     Embedding based on PCA.
@@ -470,19 +564,27 @@ class RoundedPCAEmbedding(PCAEmbedding):
         return embedding
 
 
-def embed_or_raw(data: Domain, quality: float, verbose: bool = False) -> Embedding:
-    embedded = RoundedPCAEmbedding.from_data(data, quality=quality, verbose=verbose)
+def best_embedding(data: Domain, quality: float, verbose: bool = False) -> Embedding:
     n, m = data.shape
+
+    if StaticEmbedding.is_valid(data, quality):
+        static = StaticEmbedding.from_data(data, quality, verbose)
+        if verbose:
+            print(f"  stored ({n} x {m}) as static {len(static.tobytes())} bytes")
+        return static
+
+    embedded = RoundedPCAEmbedding.from_data(data, quality=quality, verbose=verbose)
     raw = RawEmbedding(n, m, data.dtype)
     pcabytes = len(embedded.tobytes()) + len(embedded.project(data).tobytes())
     rawbytes = len(raw.tobytes()) + len(raw.project(data).tobytes())
     if pcabytes >= rawbytes:
         if verbose:
-            print(f"  stored raw as {rawbytes} rather than {pcabytes}")
+            print(f"  stored raw as {rawbytes} rather than {pcabytes} bytes")
         return raw
     else:
         return embedded
 
 
 _classmap.register(1, RawEmbedding)
-_classmap.register(2, PCAEmbedding)
+_classmap.register(2, StaticEmbedding)
+_classmap.register(3, PCAEmbedding)
