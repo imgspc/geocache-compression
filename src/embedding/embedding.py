@@ -42,6 +42,14 @@ class Embedding(ABC):
         """
         ...
 
+    @classmethod
+    @abstractmethod
+    def is_valid(cls, data: np.ndarray, quality: float) -> bool:
+        """
+        Return whether this embedding can represent the given data for the given quality bound.
+        """
+        ...
+
     @abstractmethod
     def tobytes(self) -> bytes:
         """
@@ -155,6 +163,10 @@ class RawEmbedding(Embedding):
         self.m = m
         self.dtype = dtype
 
+    @classmethod
+    def is_valid(cls, data: np.ndarray, quality: float) -> bool:
+        return True
+
     def project(self, data: Domain) -> Reduced:
         return data
 
@@ -169,6 +181,11 @@ class RawEmbedding(Embedding):
                 pack_dtype(self.dtype),
             )
         )
+
+    @staticmethod
+    def from_data(data: Domain, quality: float, verbose: bool = False) -> RawEmbedding:
+        n, m = data.shape
+        return RawEmbedding(n, m, data.dtype)
 
     @classmethod
     def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
@@ -210,8 +227,8 @@ class StaticEmbedding(Embedding):
         self.c = c
         self.n = n
 
-    @staticmethod
-    def is_valid(data: Domain, quality: float) -> bool:
+    @classmethod
+    def is_valid(cls, data: Domain, quality: float) -> bool:
         """
         Is the data actually static?
         """
@@ -286,7 +303,7 @@ class CenteredPCAEmbedding(Embedding):
     """
     Embedding based on PCA, assuming the data is centered around the origin.
 
-    Use PCAEmbedding if the data is not centered.
+    Use PCAEmbedding if the data is not centered, or just suffer the math being wonky.
     """
 
     __slots__ = ("n", "m", "k", "WVt", "U", "WVtInv")
@@ -301,6 +318,10 @@ class CenteredPCAEmbedding(Embedding):
         self.k = k
         self.WVt = WVt
         self.U: Optional[np.ndarray] = None
+
+    @classmethod
+    def is_valid(cls, data: Domain, quality: float) -> bool:
+        return True
 
     def project(self, data: Domain) -> Reduced:
         """
@@ -435,7 +456,7 @@ class CenteredPCAEmbedding(Embedding):
                 U = np.array(U[:, 0:count], copy=True)
                 eps = np.array(eps[0:count], copy=True)
 
-            if verbose or not verbose:
+            if verbose:
                 print(
                     f"{M.shape}, projected to {WVt.shape}: {M.size} reduced to {WVt.size} + {U.size} ({(WVt.size + U.size)/M.size:.2%})"
                 )
@@ -496,6 +517,10 @@ class PCAEmbedding(Embedding):
         """
         self.pca = pca
         self.c = c
+
+    @classmethod
+    def is_valid(cls, data: Domain, quality: float) -> bool:
+        return True
 
     def project(self, data: Domain) -> Reduced:
         """
@@ -572,27 +597,35 @@ class PCAEmbedding(Embedding):
         return PCAEmbedding(pca, c)
 
 
-def best_embedding(data: Domain, quality: float, verbose: bool = False) -> Embedding:
+def best_embedding(
+    data: Domain,
+    quality: float,
+    verbose: bool = False,
+    candidates=[StaticEmbedding, PCAEmbedding, RawEmbedding],
+) -> Embedding:
     n, m = data.shape
 
-    if StaticEmbedding.is_valid(data, quality):
-        static = StaticEmbedding.from_data(data, quality, verbose)
-        if verbose:
-            print(f"  stored ({n} x {m}) as static {len(static.tobytes())} bytes")
-        return static
-
-    embedded = PCAEmbedding.from_data(data, quality=quality, verbose=verbose)
-    raw = RawEmbedding(n, m, data.dtype)
-    pcabytes = len(embedded.tobytes()) + len(embedded.project(data).tobytes())
-    rawbytes = len(raw.tobytes()) + len(raw.project(data).tobytes())
-    if pcabytes >= rawbytes:
-        if verbose:
-            print(f"  stored raw as {rawbytes} rather than {pcabytes} bytes")
-        return raw
-    else:
-        return embedded
+    embeddings = [
+        candidate.from_data(data, quality, verbose)
+        for candidate in candidates
+        if candidate.is_valid(data, quality)
+    ]
+    lengths = [
+        len(embed.tobytes()) + len(embed.project(data).tobytes())
+        for embed in embeddings
+    ]
+    ordered = sorted(zip(embeddings, lengths), key=lambda el: el[1])
+    best_embed, best_length = ordered[0]
+    if verbose:
+        best_cls = best_embed.__class__.__name__
+        print(f"  stored ({n} x {m}) as {best_length} bytes for {best_cls}")
+        for other_embed, other_length in ordered[1:]:
+            other_cls = other_embed.__class__.__name__
+            print(f"    better than {other_length} bytes for {other_cls}")
+    return best_embed
 
 
 _classmap.register(1, RawEmbedding)
 _classmap.register(2, StaticEmbedding)
 _classmap.register(3, PCAEmbedding)
+_classmap.register(4, CenteredPCAEmbedding)
