@@ -282,22 +282,16 @@ class StaticEmbedding(Embedding):
         return np.array([], dtype=self.c.dtype), offset
 
 
-class PCAEmbedding(Embedding):
+class CenteredPCAEmbedding(Embedding):
     """
-    Embedding based on PCA.
+    Embedding based on PCA, assuming the data is centered around the origin.
 
-    We model the data as all fitting on a lower-dimensional subspace (or a
-    full-dimensional one, but with different axes).
-
-    E.g. Given data as a 3d position per timestep, setting k = 2 means we're modeling
-    the point as moving along a plane.
-
-    Getting to higher dimensions, it gets harder to visualize what's going on.
+    Use PCAEmbedding if the data is not centered.
     """
 
-    __slots__ = ("n", "m", "k", "c", "WVt", "U", "WVtInv")
+    __slots__ = ("n", "m", "k", "WVt", "U", "WVtInv")
 
-    def __init__(self, n: int, m: int, k: int, c: np.ndarray, WVt: np.ndarray):
+    def __init__(self, n: int, m: int, k: int, WVt: np.ndarray):
         """
         Most users will want to use `from_data` or `from_bytes` rather than directly
         using the constructor.
@@ -305,71 +299,8 @@ class PCAEmbedding(Embedding):
         self.n = n
         self.m = m
         self.k = k
-        self.c = c
         self.WVt = WVt
         self.U: Optional[np.ndarray] = None
-        self.WVtInv: Optional[np.ndarray] = None
-
-    @staticmethod
-    def from_data(data: Domain, quality: float, verbose: bool = False) -> PCAEmbedding:
-        """
-        Perform PCA on the data, which must have shape (n, m).
-
-        Quality should be in [0,1]
-        """
-        if len(data.shape) != 2:
-            raise ValueError(f"Shape {data.shape} should be a matrix")
-        (n, m) = data.shape
-        if not n or not m:
-            raise ValueError(f"Empty matrix with shape {data.shape}")
-
-        # Translate the data to the origin.
-        c = np.sum(data, axis=0) / n
-        M = data - c
-
-        # Perform SVD:
-        # Vt is the orthonormal basis,
-        # W is the diagonal weight matrix, stored as a vector of singular values
-        # U is the data rewritten in the SVD basis.
-        #
-        # We can't assume M is hermitian, so we need the full computation.
-        # We definitely need U and V.
-        # We don't want a square U (it would be huge).
-        U, s, Vt = np.linalg.svd(M, full_matrices=False)
-
-        # Dimensionality reduction: Keep the most significant values only.
-        if quality == 1:
-            count = min(data.shape)
-        elif quality >= 0 and quality < 1:
-            # find the number of components needed to explain more than k of the variance
-            # note: don't use running_sum = s.cumsum() / s.sum() because roundoff can make
-            # the last cumulative sum be significantly different than the sum.
-            running_sum = s.cumsum()
-            running_sum = running_sum[:-1] / running_sum[-1]
-            count = 1 + running_sum.searchsorted(quality)
-            if verbose:
-                print(f"chose {count} dimensions among {running_sum}")
-        else:
-            raise ValueError(
-                f"invalid value {quality} ({type(quality)}) should be zero or a float in (0,1)"
-            )
-
-        # No dimensionality reduction? Store the whole thing
-        if count >= min(n, m):
-            WVt = np.diag(s) @ Vt
-        else:
-            # Drop row/col from W (by dropping values from s), drop rows from Vt, drop
-            # columns from U.
-            #
-            # Keep copies to allow the full-dimension memory to be released.
-            # WVt is already a copy due to the matmul.
-            # U we need to copy explictly.
-            WVt = np.diag(s[0:count]) @ Vt[0:count, :]
-            U = np.array(U[:, 0:count], copy=True)
-
-        embedding = PCAEmbedding(n, m, count, c, WVt)
-        embedding.U = U
-        return embedding
 
     def project(self, data: Domain) -> Reduced:
         """
@@ -379,21 +310,14 @@ class PCAEmbedding(Embedding):
         The data is assumed to be identical to what we analyzed -- and we don't
         verify that assumption.
         """
-        if self.U is not None:
-            # Normally we already projected the data and got U:
-            return self.U
-        if self.WVtInv is None:
-            # When reconstructing from bytes we don't know U so compute it:
-            #    data = U W Vt
-            # and we want U. Post-multiply both sides with the inverse of WVt,
-            # we get:
-            #   data WVt+ = U WVt WVt+ = U
-            # Store WVtInv once, and then we can run project repeatedly.
-            self.WVtInv = np.linalg.pinv(self.WVt)
-        return data @ self.WVtInv
+        if self.U is None:
+            # It's actually possible: just invert WVt (aka transpose it) and
+            # multiply. But I don't want to bother testing and debugging.
+            raise ValueError("Unable to project from deserialized PCA")
+        return self.U
 
     def invert(self, data: Reduced) -> Domain:
-        return data @ self.WVt + self.c
+        return data @ self.WVt
 
     def tobytes(self) -> bytes:
         """
@@ -402,73 +326,37 @@ class PCAEmbedding(Embedding):
         The U array is not serialized, so calling `project` after deserializing
         will not give the identical result due to roundoff.
         """
-        assert self.c.dtype == self.WVt.dtype
         return b"".join(
             (
                 pack_small_uint(self.n),
                 pack_small_uint(self.m),
                 pack_small_uint(self.k),
-                pack_dtype(self.c.dtype),
-                self.c.tobytes(),
+                pack_dtype(self.WVt.dtype),
                 self.WVt.tobytes(),
             )
         )
 
-    @classmethod
-    def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
-        """
-        Read from the bytes starting at offset, return an embedding
-        and the new offset for the next read.
-        """
-        (n, offset) = unpack_small_uint(b, offset)
-        (m, offset) = unpack_small_uint(b, offset)
-        (k, offset) = unpack_small_uint(b, offset)
-        (t, offset) = unpack_dtype(b, offset)
-        assert issubclass(t, np.number)
-        tsize = t(0).itemsize
-
-        c = np.frombuffer(b, offset=offset, dtype=t, count=m)
-        offset += tsize * m
-
-        WVt_flat = np.frombuffer(b, offset=offset, dtype=t, count=k * m)
-        WVt = np.reshape(WVt_flat, (k, m))
-        offset += tsize * k * m
-
-        return (cls(n, m, k, c, WVt), offset)
-
-    def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
-        t = self.c.dtype
-        U_flat = np.frombuffer(b, offset=offset, dtype=t, count=self.k * self.n)
-        U = np.reshape(U_flat, (self.n, self.k))
-        offset += t.itemsize * self.k * self.n
-
-        return (U, offset)
-
-
-class RoundedPCAEmbedding(PCAEmbedding):
     @staticmethod
-    def from_data(data: Domain, quality: float, verbose: bool = False) -> PCAEmbedding:
+    def from_data(
+        M: Domain, quality: float, verbose: bool = False
+    ) -> CenteredPCAEmbedding:
         """
-        Perform PCA on the data, which must have shape (n, m).
+        Perform PCA on the data, which must have shape (n, m) and should be
+        centered about the origin to get mathematically reasonable results.
 
         Guarantee that the error in any single value is at most "quality";
         lower quality is better.
         """
-        if len(data.shape) != 2:
-            raise ValueError(f"Shape {data.shape} should be a matrix")
-        (n, m) = data.shape
+        if len(M.shape) != 2:
+            raise ValueError(f"Shape {M.shape} should be a matrix")
+        (n, m) = M.shape
         if not n or not m:
-            raise ValueError(f"Empty matrix with shape {data.shape}")
+            raise ValueError(f"Empty matrix with shape {M.shape}")
         min_d = min(n, m)
+        t = M.dtype
 
-        alpha = quality
-        if alpha < 0:
+        if quality < 0:
             raise ValueError(f"invalid quality {quality}")
-
-        # Translate the data to the origin. Round to the nearest alpha.
-        c = np.sum(data, axis=0) / n
-        c = np.round(c / alpha) * alpha
-        M = data - c
 
         # Perform SVD:
         # Vt is the pseudo-rotation to the SVD basis (transpose of V, historical reasons)
@@ -481,11 +369,11 @@ class RoundedPCAEmbedding(PCAEmbedding):
         # We don't want the full matrices, they'd be huge.
         U, s, Vt = np.linalg.svd(M, full_matrices=False)
 
-        if alpha == 0:
+        if quality == 0:
             count = min_d
             WVt = np.diag(s) @ Vt
         else:
-            # Round off to U', W', Vt' so that M' = U'W'Vt' and ||M-M'||_inf < alpha.
+            # Round off to U', W', Vt' so that M' = U'W'Vt' and ||M-M'||_inf < quality.
             # U and V are rotations so the rows are unit vectors.
             # W is a diagonal matrix with non-negative values, in order biggest first.
             # M = U W Vt
@@ -507,21 +395,22 @@ class RoundedPCAEmbedding(PCAEmbedding):
             #                = |sum_k [                                +- eps_k (s_k Vt_kj + U_ik) +- eps_k^2]|
             # Given that U_i and Vt_k are unit vectors this is bounded by:
             #             <= sum_k |eps_k (s_k + 1)| + eps_k^2
-            # To ensure the error is at most alpha, then, it suffices to choose eps to satisfy:
-            #       alpha >= sum_k eps_k (s_k + 1) + eps_k^2
+            # To ensure the error is at most quality, then, it suffices to choose eps to satisfy:
+            #       quality >= sum_k eps_k (s_k + 1) + eps_k^2
             # Allowing each component of eps to have equal weight (and requiring they are positive):
-            #       alpha / min(data.shape) == eps_k (s_k + 1) + eps_k^2
+            #       quality / min(data.shape) == eps_k (s_k + 1) + eps_k^2
             # solve for eps_k:
-            #       eps_k = [-(s_k+1) + sqrt((s_k+1)^2 + 4 alpha/min(data.shape))] / 2
+            #       eps_k = [-(s_k+1) + sqrt((s_k+1)^2 + 4 quality/min(data.shape))] / 2
             # Note that eps_k is strictly positive, so we can divide by it safely.
             #
             # Once the eps vector is chosen, note that rounding s can zero out some entries entirely,
             # achieving dimensionality reduction.
             #
+            # TODO: make eps be precisely a power of two so that rounding zeroes out low-order bits.
 
             # Given the s1^2, we need to do the math here in higher precision.
             higher: DTypeLike
-            match data.dtype:
+            match t:
                 case np.float16:
                     higher = np.float32
                 case np.float32:
@@ -529,7 +418,7 @@ class RoundedPCAEmbedding(PCAEmbedding):
                 case _:
                     higher = np.longdouble
             s1 = np.array(s, dtype=higher) + higher(1)  # type: ignore
-            s1s1 = s1 * s1 + (4 * alpha / min_d)
+            s1s1 = s1 * s1 + (4 * quality / min_d)
             s1s1_sqrt = np.sqrt(s1s1)
             eps = 0.5 * (s1s1_sqrt - s1)
 
@@ -548,7 +437,7 @@ class RoundedPCAEmbedding(PCAEmbedding):
 
             if verbose or not verbose:
                 print(
-                    f"{data.shape}, projected to {WVt.shape}: {M.size} reduced to {WVt.size} + {U.size} ({(WVt.size + U.size)/M.size:.2%})"
+                    f"{M.shape}, projected to {WVt.shape}: {M.size} reduced to {WVt.size} + {U.size} ({(WVt.size + U.size)/M.size:.2%})"
                 )
 
             # Now, round the matrices.
@@ -556,12 +445,131 @@ class RoundedPCAEmbedding(PCAEmbedding):
             # WVt we do that to the transpose to operate on each column component-wise
             #
             # Make sure to save as the original data size.
-            U = np.array(np.round(U / eps) * eps, dtype=data.dtype)
-            WVt = np.array((np.round(WVt.T / eps) * eps).T, dtype=data.dtype)
+            U = np.array(np.round(U / eps) * eps, dtype=t)
+            WVt = np.array((np.round(WVt.T / eps) * eps).T, dtype=t)
 
-        embedding = PCAEmbedding(n, m, count, c, WVt)
+        embedding = CenteredPCAEmbedding(n, m, count, WVt)
         embedding.U = U
         return embedding
+
+    @classmethod
+    def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
+        """
+        Read from the bytes starting at offset, return an embedding
+        and the new offset for the next read.
+        """
+        (n, offset) = unpack_small_uint(b, offset)
+        (m, offset) = unpack_small_uint(b, offset)
+        (k, offset) = unpack_small_uint(b, offset)
+        (t, offset) = unpack_dtype(b, offset)
+        assert issubclass(t, np.number)
+        tsize = t(0).itemsize
+
+        WVt_flat = np.frombuffer(b, offset=offset, dtype=t, count=k * m)
+        WVt = np.reshape(WVt_flat, (k, m))
+        offset += tsize * k * m
+
+        return (cls(n, m, k, WVt), offset)
+
+    def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
+        t = self.WVt.dtype
+        U_flat = np.frombuffer(b, offset=offset, dtype=t, count=self.k * self.n)
+        U = np.reshape(U_flat, (self.n, self.k))
+        offset += t.itemsize * self.k * self.n
+
+        return (U, offset)
+
+
+class PCAEmbedding(Embedding):
+    """
+    Embedding based on PCA.
+
+    The data need not be centered.
+    """
+
+    __slots__ = ("pca", "c")
+
+    def __init__(self, pca: CenteredPCAEmbedding, c: np.ndarray):
+        """
+        Most users will want to use `from_data` or `from_bytes` rather than directly
+        using the constructor.
+        """
+        self.pca = pca
+        self.c = c
+
+    def project(self, data: Domain) -> Reduced:
+        """
+        Data is ignored, we just return the same PCA projection we started with.
+        """
+        if self.pca.U is None:
+            # Centre the data, then get the CenteredPCA to project.
+            # Or... don't care.
+            raise ValueError("Unable to project from deserialized PCA")
+        return self.pca.U
+
+    def invert(self, projected: Reduced) -> Domain:
+        return self.pca.invert(projected) + self.c
+
+    def tobytes(self) -> bytes:
+        """
+        Convert the embedding to a bytes object for serialization.
+        """
+        assert self.c.dtype == self.pca.WVt.dtype
+        return b"".join(
+            (
+                self.pca.tobytes(),
+                self.c.tobytes(),
+            )
+        )
+
+    @classmethod
+    def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
+        """
+        Read from the bytes starting at offset, return an embedding
+        and the new offset for the next read.
+        """
+        (pca, offset) = CenteredPCAEmbedding.from_bytes(b, offset)
+        assert isinstance(pca, CenteredPCAEmbedding)
+        m = pca.m
+        t = pca.WVt.dtype
+        tsize = t.itemsize
+
+        c = np.frombuffer(b, offset=offset, dtype=t, count=m)
+        offset += tsize * m
+
+        return (cls(pca, c), offset)
+
+    def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
+        return self.pca.read_projection(b, offset)
+
+    @staticmethod
+    def from_data(data: Domain, quality: float, verbose: bool = False) -> PCAEmbedding:
+        """
+        Perform PCA on the data, which must have shape (n, m).
+
+        Guarantee that the error in any single value is at most "quality" units off.
+        Lower "quality" is better. We can't guarantee we can actually achieve
+        the given quality bound if it's too small.
+        """
+        if len(data.shape) != 2:
+            raise ValueError(f"Shape {data.shape} should be a matrix")
+        (n, m) = data.shape
+        if not n or not m:
+            raise ValueError(f"Empty matrix with shape {data.shape}")
+
+        if quality < 0:
+            raise ValueError(f"invalid quality {quality}")
+
+        # Find the centroid and round it to centre the data about the origin.
+        # TODO: we should likely round to a power of 2 just below alpha, so
+        # that we're truncating bits.
+        c = np.sum(data, axis=0) / n
+        c = np.round(c / quality) * quality
+        M = data - c
+
+        # Get the PCA of the centered data and return the full embedding with the centre.
+        pca = CenteredPCAEmbedding.from_data(M, quality, verbose)
+        return PCAEmbedding(pca, c)
 
 
 def best_embedding(data: Domain, quality: float, verbose: bool = False) -> Embedding:
@@ -573,7 +581,7 @@ def best_embedding(data: Domain, quality: float, verbose: bool = False) -> Embed
             print(f"  stored ({n} x {m}) as static {len(static.tobytes())} bytes")
         return static
 
-    embedded = RoundedPCAEmbedding.from_data(data, quality=quality, verbose=verbose)
+    embedded = PCAEmbedding.from_data(data, quality=quality, verbose=verbose)
     raw = RawEmbedding(n, m, data.dtype)
     pcabytes = len(embedded.tobytes()) + len(embedded.project(data).tobytes())
     rawbytes = len(raw.tobytes()) + len(raw.project(data).tobytes())
