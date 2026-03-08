@@ -50,11 +50,16 @@ set_target_properties(abc-compare PROPERTIES
         BUILD_RPATH ${ALEMBIC_LIBDIR}
         INSTALL_RPATH ${ALEMBIC_LIBDIR})
 
+set(BUILD_FLOAT_COMPRESSORS ON CACHE BOOL "" FORCE)
+add_subdirectory(neats)
+
 INSTALL(TARGETS
         abc-parse
         abc-separate
         abc-combine
         abc-compare
+        neats_compress
+        neats_decompress
 )
 
 # Install only the python files that need to be alongside the binary files.
