@@ -537,9 +537,8 @@ def cluster_static_first(
         if len(mdc_indices)
         else static_indices
     )
+    base_offset = np.array([len(static_indices)])
     offsets = (
-        np.concatenate([len(static_indices)], mdc_offsets)
-        if len(mdc_offsets)
-        else np.array([len(static_indices)])
+        np.concatenate((base_offset, mdc_offsets)) if len(mdc_offsets) else base_offset
     )
     return Covering(indices, offsets)
