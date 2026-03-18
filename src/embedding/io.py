@@ -266,7 +266,7 @@ def create_embedding(
         print(f"  read {data.size * data.itemsize} bytes")
 
     # Form the clusters
-    cover = cluster_fn(data, quality = quality, **kwargs)
+    cover = cluster_fn(data, quality=quality, **kwargs)
     if verbose:
         print(f"  created {cover.nsubsets} clusters")
 
