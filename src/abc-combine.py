@@ -31,6 +31,7 @@ parser.add_argument(
     "--override",
     nargs=2,
     action="append",
+    default=[],
     help="Override a property with a different binary file",
 )
 
