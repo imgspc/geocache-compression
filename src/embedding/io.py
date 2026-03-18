@@ -204,7 +204,7 @@ def separate_usd(usdfile: str, outdir: str, verbose: bool = False) -> Package:
 
     headers: list[Header] = []
     for prim in stage.Traverse():
-        if not prim.IsA(UsdGeom.Mesh):
+        if not prim.IsA(UsdGeom.Mesh):  # type:ignore
             continue
         mesh = UsdGeom.Mesh(prim)
         attr = mesh.GetPointsAttr()
