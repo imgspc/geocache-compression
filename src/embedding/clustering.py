@@ -178,35 +178,37 @@ class Covering:
 def slice(a: np.ndarray, cover: Covering) -> Iterator[np.ndarray]:
     """
     Given an array a with shape (nsamples, nverts, ndim) and a covering of the vertices,
-    return matrices with shape (nsamples, len(subset) * ndim)
-
-    Ex 1. if the covering returns 1-element arrays [0], [1], ... then we'll return
-    matrices that describe in each row the position of each vertex over time.
-
-    Ex 2. if the covering returns 10-element arrays, then we concatenate the
-    positions of those ten vertices to return a 30-column matrix of positions
-    over time.
+    return arrays with shape (nsamples, subset, ndim)
     """
     nsamples, nverts, ndim = a.shape
     for subset in cover.subsets:
-        yield a.take(subset, axis=1).reshape(nsamples, len(subset) * ndim)
+        yield a.take(subset, axis=1)
 
 
-def unslice(slices: list[np.ndarray], cover: Covering, ndim: int) -> np.ndarray:
+def unslice(slices: list[np.ndarray], cover: Covering) -> np.ndarray:
     """
-    Given matrices with shape (nsamples, len(subset) * ndim), get back
+    Given arrays with shape (nsamples, subset, ndim), get back
     an array with shape (nsamples, nverts, ndim).
+
+    This is the reverse operation of slice().
     """
     if len(slices) != cover.nsubsets:
         raise ValueError(f"Unmatched slicings: {len(slices)} versus {cover.nsubsets}")
 
-    # Reshape the list of slices
-    flattened = np.concatenate(slices, axis=1)
-    (nsamples, ndata) = flattened.shape
-    if ndata % ndim != 0:
-        raise ValueError(f"Data is not {ndim}-dimensional: shape {flattened.shape}")
-    nverts = ndata // ndim
-    byvertex = flattened.reshape((nsamples, nverts, ndim))
+    # verify that each slice has the same number of samples and dimensions,
+    # varies only in the number of vertices
+    shapes_py = [slc.shape for slc in slices]
+    if len([True for shape in shapes_py if len(shape) != 3]) > 0:
+        raise ValueError(f"Some slice has dimension other than 3.")
+    shapes = np.array(shapes_py, dtype=int)
+    nsamples = np.unique(shapes[:, 0])
+    ndims = np.unique(shapes[:, 2])
+    if len(nsamples) != 1:
+        raise ValueError(f"nsamples varies {nsamples}")
+    if len(ndims) != 1:
+        raise ValueError(f"ndims varies {ndims}")
+
+    byvertex = np.concatenate(slices, axis=1)
 
     # Check if we need to reorder
     if cover.is_id_permutation():

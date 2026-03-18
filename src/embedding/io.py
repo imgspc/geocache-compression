@@ -11,6 +11,7 @@ import re
 from typing import Any, Optional, Iterable, Union
 from numpy.typing import DTypeLike
 from embedding import embedding, clustering, metric
+from embedding.embedding import best_embedding
 
 # Inputs:
 #       .json -- provides nsamples, type, size, extent for all properties
@@ -240,9 +241,9 @@ def separate_usd(usdfile: str, outdir: str, verbose: bool = False) -> Package:
 
 def create_embedding(
     header: Header,
-    quality: float = 0.999,
+    quality: float,
     verbose=False,
-    embed_fn=embedding.PCAEmbedding.from_data,
+    embed_fn=best_embedding,
     cluster_fn=clustering.cluster_by_index,
     **kwargs,
 ) -> tuple[str, str, str]:
@@ -251,13 +252,9 @@ def create_embedding(
 
     Return the names of all the binary files created.
 
-    Any arguments beyond quality, verbose, and cluster_fn are passed to the clustering function.
-
     cluster_fn must take as its first parameter the data, an ndarray
     with shape (nsamples, nverts, ndim); after that, it may require or
     optionally accept more arguments in the kwargs.
-
-    Passing invalid kwargs will raise a TypeError.
     """
     if verbose:
         print(f"reducing dimension of {header}")
@@ -269,7 +266,7 @@ def create_embedding(
         print(f"  read {data.size * data.itemsize} bytes")
 
     # Form the clusters
-    cover = cluster_fn(data, **kwargs)
+    cover = cluster_fn(data, quality = quality, **kwargs)
     if verbose:
         print(f"  created {cover.nsubsets} clusters")
 
@@ -333,14 +330,14 @@ def read_embedding(
         slices.append(embed.invert(projected))
 
     # The data is now sliced up, unslice it.
-    return clustering.unslice(slices, cover, header.extent)
+    return clustering.unslice(slices, cover)
 
 
 def run_single_report(
     header: Header,
     quality: float,
     cluster_fn=clustering.cluster_by_index,
-    embed_fn=embedding.PCAEmbedding.from_data,
+    embed_fn=best_embedding,
     verbose: bool = False,
     **kwargs,
 ) -> metric.Report:
@@ -361,7 +358,7 @@ def run_all_reports(
     package: Package,
     quality: float,
     cluster_fn=clustering.cluster_by_index,
-    embed_fn=embedding.PCAEmbedding.from_data,
+    embed_fn=best_embedding,
     verbose: bool = False,
     **kwargs,
 ) -> dict[str, metric.Report]:

@@ -21,6 +21,16 @@ Reduced = np.ndarray
 
 
 class Embedding(ABC):
+    @classmethod
+    @abstractmethod
+    def from_data(
+        cls, data: Domain, quality: float, verbose: bool = False
+    ) -> Embedding:
+        """
+        Compute an embedding for the given data and quality bounds.
+        """
+        ...
+
     @abstractmethod
     def project(self, data: Domain) -> Reduced:
         """
@@ -156,12 +166,18 @@ class RawEmbedding(Embedding):
     This is just the identity; we store the data, and do nothing with it.
     """
 
-    __slots__ = ["nsamples", "nverts", "ndim"]
-
-    def __init__(self, n: int, m: int, dtype):
-        self.n = n
-        self.m = m
+    def __init__(self, nsamples: int, nverts: int, ndim: int, dtype):
+        self.nsamples = nsamples
+        self.nverts = nverts
+        self.ndim = ndim
         self.dtype = dtype
+
+    @classmethod
+    def from_data(
+        cls, data: Domain, quality: float, verbose: bool = False
+    ) -> Embedding:
+        n, m, d = data.shape
+        return cls(n, m, d, data.dtype)
 
     @classmethod
     def is_valid(cls, data: np.ndarray, quality: float) -> bool:
@@ -176,32 +192,29 @@ class RawEmbedding(Embedding):
     def tobytes(self) -> bytes:
         return b"".join(
             (
-                pack_small_uint(self.n),
-                pack_small_uint(self.m),
+                pack_small_uint(self.nsamples),
+                pack_small_uint(self.nverts),
+                pack_small_uint(self.ndim),
                 pack_dtype(self.dtype),
             )
         )
-
-    @staticmethod
-    def from_data(data: Domain, quality: float, verbose: bool = False) -> RawEmbedding:
-        n, m = data.shape
-        return RawEmbedding(n, m, data.dtype)
 
     @classmethod
     def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
         (n, offset) = unpack_small_uint(b, offset)
         (m, offset) = unpack_small_uint(b, offset)
+        (d, offset) = unpack_small_uint(b, offset)
         (t, offset) = unpack_dtype(b, offset)
         assert issubclass(t, np.number)
-        return (RawEmbedding(n, m, t), offset)
+        return (RawEmbedding(n, m, d, t), offset)
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
-        ndata = self.n * self.m
+        ndata = self.nsamples * self.nverts * self.ndim
         flatdata = np.frombuffer(b, offset=offset, dtype=self.dtype, count=ndata)
         tsize = flatdata.itemsize
         offset += tsize * ndata
 
-        data = np.reshape(flatdata, (self.n, self.m))
+        data = np.reshape(flatdata, (self.nsamples, self.nverts, self.ndim))
         return (data, offset)
 
 
@@ -216,39 +229,39 @@ class StaticEmbedding(Embedding):
     use another embedding!
     """
 
-    def __init__(self, c: np.ndarray, n: int):
+    def __init__(self, c: np.ndarray, nsamples: int):
         """
         Most users will want to use `from_data` or `from_bytes` rather than directly
         using the constructor.
 
-        c is the centroid, dimensions 1 x m
-        n is the number of rows in the original data
+        c is the centroid, shape (1, nverts, ndim)
+        nsamples is the number of rows in the original data
         """
         self.c = c
-        self.n = n
+        self.nsamples = nsamples
+
+    @classmethod
+    def from_data(
+        cls, data: Domain, quality: float, verbose: bool = False
+    ) -> Embedding:
+        """
+        Compute a static embedding from static data.
+
+        We do not check validity; use is_valid if you want that.
+        """
+        (nsamples, nverts, ndim) = data.shape
+        c = np.sum(data, axis=0) / nsamples
+        return cls(c, nsamples)
 
     @classmethod
     def is_valid(cls, data: Domain, quality: float) -> bool:
         """
         Is the data actually static?
         """
-        (n, m) = data.shape
-        c = np.sum(data, axis=0) / n
+        (nsamples, nverts, ndim) = data.shape
+        c = np.sum(data, axis=0) / nsamples
         M = data - c
         return np.max(np.fabs(M)) <= quality
-
-    @staticmethod
-    def from_data(
-        data: Domain, quality: float, verbose: bool = False
-    ) -> StaticEmbedding:
-        """
-        Compute a static embedding from static data.
-
-        We do not check validity; use is_valid if you want that.
-        """
-        (n, m) = data.shape
-        c = np.sum(data, axis=0) / n
-        return StaticEmbedding(c, n)
 
     def project(self, data: Domain) -> Reduced:
         """
@@ -261,16 +274,18 @@ class StaticEmbedding(Embedding):
         Invert the lower-dimensional space (an empty vector) back to the original space,
         i.e. return the centroid repeated every frame.
         """
-        return np.tile(self.c, (self.n, 1))
+        return np.tile(self.c, (self.nsamples, 1, 1))
 
     def tobytes(self) -> bytes:
         """
         Write the matrix size, type, and centroid.
         """
+        nverts, ndim = self.c.shape
         return b"".join(
             (
-                pack_small_uint(self.n),
-                pack_small_uint(len(self.c)),
+                pack_small_uint(self.nsamples),
+                pack_small_uint(nverts),
+                pack_small_uint(ndim),
                 pack_dtype(self.c.dtype),
                 self.c.tobytes(),
             )
@@ -283,11 +298,13 @@ class StaticEmbedding(Embedding):
         """
         (n, offset) = unpack_small_uint(b, offset)
         (m, offset) = unpack_small_uint(b, offset)
+        (d, offset) = unpack_small_uint(b, offset)
         (t, offset) = unpack_dtype(b, offset)
         assert issubclass(t, np.number)
-        c = np.frombuffer(b, offset=offset, dtype=t, count=m)
+        c = np.frombuffer(b, offset=offset, dtype=t, count=m * d)
+        c = np.reshape(c, (m, d))
         tsize = c.itemsize
-        offset += tsize * m
+        offset += tsize * m * d
         return (StaticEmbedding(c, n), offset)
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
@@ -296,17 +313,17 @@ class StaticEmbedding(Embedding):
 
         There is no projection: this reads nothing and returns an empty vector.
         """
-        return np.array([], dtype=self.c.dtype), offset
+        return np.array([]), offset
 
 
-class CenteredPCAEmbedding(Embedding):
+class FlatCenteredPCA:
     """
-    Embedding based on PCA, assuming the data is centered around the origin.
+    Embedding-like class based on PCA, assuming the data is centered around the
+    origin and the input data has shape (n, m)
 
-    Use PCAEmbedding if the data is not centered, or just suffer the math being wonky.
+    This is *not* an Embedding because the caller needs to decide how to
+    flatten the data of shape (nsamples, nvertices, ndim) into shape (n, m).
     """
-
-    __slots__ = ("n", "m", "k", "WVt", "U", "WVtInv")
 
     def __init__(self, n: int, m: int, k: int, WVt: np.ndarray):
         """
@@ -357,10 +374,10 @@ class CenteredPCAEmbedding(Embedding):
             )
         )
 
-    @staticmethod
+    @classmethod
     def from_data(
-        M: Domain, quality: float, verbose: bool = False
-    ) -> CenteredPCAEmbedding:
+        cls, M: Domain, quality: float, verbose: bool = False
+    ) -> FlatCenteredPCA:
         """
         Perform PCA on the data, which must have shape (n, m) and should be
         centered about the origin to get mathematically reasonable results.
@@ -469,12 +486,12 @@ class CenteredPCAEmbedding(Embedding):
             U = np.array(np.round(U / eps) * eps, dtype=t)
             WVt = np.array((np.round(WVt.T / eps) * eps).T, dtype=t)
 
-        embedding = CenteredPCAEmbedding(n, m, count, WVt)
+        embedding = cls(n, m, count, WVt)
         embedding.U = U
         return embedding
 
     @classmethod
-    def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
+    def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[FlatCenteredPCA, int]:
         """
         Read from the bytes starting at offset, return an embedding
         and the new offset for the next read.
@@ -501,39 +518,93 @@ class CenteredPCAEmbedding(Embedding):
         return (U, offset)
 
 
-class PCAEmbedding(Embedding):
+class AbstractPCAEmbedding(Embedding):
     """
-    Embedding based on PCA.
-
-    The data need not be centered.
+    Embedding class where we do PCA. Subclasses decide whether to do it in
+    configuration space or in euclidean space.
     """
 
-    __slots__ = ("pca", "c")
+    @classmethod
+    @abstractmethod
+    def flatten(cls, data: np.ndarray) -> np.ndarray:
+        """
+        Given data of shape (nsamples, nverts, ndim) flatten it to (n, m).
+        """
+        ...
 
-    def __init__(self, pca: CenteredPCAEmbedding, c: np.ndarray):
+    @abstractmethod
+    def unflatten(self, data: np.ndarray) -> np.ndarray:
+        """
+        Given data of shape (n, m) spread it out to shape (nsamples, nverts, ndim).
+        """
+        ...
+
+    def __init__(self, pca: FlatCenteredPCA, c: np.ndarray):
         """
         Most users will want to use `from_data` or `from_bytes` rather than directly
         using the constructor.
         """
         self.pca = pca
         self.c = c
+        if len(c.shape) != 2:
+            raise ValueError(
+                f"centroid shape should be (nverts, ndim) rather than {c.shape}"
+            )
+
+    @classmethod
+    def from_data(
+        cls, data: Domain, quality: float, verbose: bool = False
+    ) -> Embedding:
+        """
+        Perform PCA on the data, which must have shape (nsamples, nverts, ndim).
+
+        Guarantee that the error in any single value is at most "quality" units off.
+        Lower "quality" is better. We can't guarantee we can actually achieve
+        the given quality bound if it's too small.
+        """
+        if len(data.shape) != 3:
+            raise ValueError(
+                f"Shape {data.shape} should have shape (nsamples, nverts, ndim)"
+            )
+        (nsamples, nverts, ndim) = data.shape
+        if not nsamples or not nverts or not ndim:
+            raise ValueError(f"Empty matrix with shape {data.shape}")
+
+        if quality < 0:
+            raise ValueError(f"invalid quality {quality}")
+
+        # Center the data.
+        c = np.sum(data, axis=0) / nsamples
+        if quality != 0:
+            c = np.round(c / quality) * quality
+        M = data - c
+
+        # Flatten M and get its PCA
+        M = cls.flatten(M)
+        pca = FlatCenteredPCA.from_data(M, quality, verbose)
+        return cls(pca, c)
 
     @classmethod
     def is_valid(cls, data: Domain, quality: float) -> bool:
         return True
+
+    @property
+    def ndim(self) -> int:
+        return self.c.shape[1]
 
     def project(self, data: Domain) -> Reduced:
         """
         Data is ignored, we just return the same PCA projection we started with.
         """
         if self.pca.U is None:
-            # Centre the data, then get the CenteredPCA to project.
-            # Or... don't care.
-            raise ValueError("Unable to project from deserialized PCA")
+            # theoretically could be done but not needed right now
+            raise NotImplementedError("Unable to project from deserialized PCA")
         return self.pca.U
 
     def invert(self, projected: Reduced) -> Domain:
-        return self.pca.invert(projected) + self.c
+        inverted_flat = self.pca.invert(projected)
+        inverted = self.unflatten(inverted_flat)
+        return inverted + self.c
 
     def tobytes(self) -> bytes:
         """
@@ -544,6 +615,7 @@ class PCAEmbedding(Embedding):
             (
                 self.pca.tobytes(),
                 self.c.tobytes(),
+                pack_small_uint(self.ndim),
             )
         )
 
@@ -553,8 +625,7 @@ class PCAEmbedding(Embedding):
         Read from the bytes starting at offset, return an embedding
         and the new offset for the next read.
         """
-        (pca, offset) = CenteredPCAEmbedding.from_bytes(b, offset)
-        assert isinstance(pca, CenteredPCAEmbedding)
+        (pca, offset) = FlatCenteredPCA.from_bytes(b, offset)
         m = pca.m
         t = pca.WVt.dtype
         tsize = t.itemsize
@@ -562,48 +633,51 @@ class PCAEmbedding(Embedding):
         c = np.frombuffer(b, offset=offset, dtype=t, count=m)
         offset += tsize * m
 
+        ndim, offset = unpack_small_uint(b, offset)
+        if m % ndim != 0:
+            raise ValueError(f"{m} does not divide evenly into {ndim} dimensions")
+        c = np.reshape(c, (m // ndim, ndim))
+
         return (cls(pca, c), offset)
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
         return self.pca.read_projection(b, offset)
 
-    @staticmethod
-    def from_data(data: Domain, quality: float, verbose: bool = False) -> PCAEmbedding:
+
+class PCAConfigurationSpaceEmbedding(AbstractPCAEmbedding):
+    """
+    Embedding class where we do PCA in configuration space.
+
+    Each row is the positions of all vertices concatenated;
+    each column is a coordinate of a vertex.
+    """
+
+    def __init__(self, pca: FlatCenteredPCA, c: np.ndarray):
         """
-        Perform PCA on the data, which must have shape (n, m).
-
-        Guarantee that the error in any single value is at most "quality" units off.
-        Lower "quality" is better. We can't guarantee we can actually achieve
-        the given quality bound if it's too small.
+        Most users will want to use `from_data` or `from_bytes` rather than directly
+        using the constructor.
         """
-        if len(data.shape) != 2:
-            raise ValueError(f"Shape {data.shape} should be a matrix")
-        (n, m) = data.shape
-        if not n or not m:
-            raise ValueError(f"Empty matrix with shape {data.shape}")
+        super().__init__(pca, c)
 
-        if quality < 0:
-            raise ValueError(f"invalid quality {quality}")
+    @classmethod
+    def flatten(cls, data: np.ndarray) -> np.ndarray:
+        nsamples, nverts, ndim = data.shape
+        return np.reshape(data, (nsamples, nverts * ndim))
 
-        # Find the centroid and round it to centre the data about the origin.
-        # TODO: we should likely round to a power of 2 just below alpha, so
-        # that we're truncating bits.
-        c = np.sum(data, axis=0) / n
-        c = np.round(c / quality) * quality
-        M = data - c
-
-        # Get the PCA of the centered data and return the full embedding with the centre.
-        pca = CenteredPCAEmbedding.from_data(M, quality, verbose)
-        return PCAEmbedding(pca, c)
+    def unflatten(self, data: np.ndarray) -> np.ndarray:
+        n, m = data.shape
+        if m % self.ndim != 0:
+            raise ValueError(f"{m} columns not divisible into {self.ndim} dimensions")
+        return np.reshape(data, (n, m // self.ndim, self.ndim))
 
 
 def best_embedding(
     data: Domain,
     quality: float,
     verbose: bool = False,
-    candidates=[StaticEmbedding, PCAEmbedding, RawEmbedding],
+    candidates=[StaticEmbedding, PCAConfigurationSpaceEmbedding, RawEmbedding],
 ) -> Embedding:
-    n, m = data.shape
+    nsamples, nverts, ndim = data.shape
 
     embeddings = [
         candidate.from_data(data, quality, verbose)
@@ -618,7 +692,7 @@ def best_embedding(
     best_embed, best_length = ordered[0]
     if verbose:
         best_cls = best_embed.__class__.__name__
-        print(f"  stored ({n} x {m}) as {best_length} bytes for {best_cls}")
+        print(f"  stored ({nsamples} x {nverts}) as {best_length} bytes for {best_cls}")
         for other_embed, other_length in ordered[1:]:
             other_cls = other_embed.__class__.__name__
             print(f"    better than {other_length} bytes for {other_cls}")
@@ -627,5 +701,4 @@ def best_embedding(
 
 _classmap.register(1, RawEmbedding)
 _classmap.register(2, StaticEmbedding)
-_classmap.register(3, PCAEmbedding)
-_classmap.register(4, CenteredPCAEmbedding)
+_classmap.register(3, PCAConfigurationSpaceEmbedding)
