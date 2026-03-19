@@ -52,30 +52,39 @@ def unpack_small_uint(b: bytes, offset: int = 0) -> tuple[int, int]:
                 return (i, offset)
 
 
+def dtype_to_int(t: np.dtype) -> int:
+    match t:
+        case np.float16:
+            return 2
+        case np.float32:
+            return 4
+        case np.float64:
+            return 8
+        case _:
+            raise ValueError("can't serialize type {t}")
+
+
+def int_to_dtype(i: int) -> type:
+    match i:
+        case 2:
+            return np.float16
+        case 4:
+            return np.float32
+        case 8:
+            return np.float64
+        case _:
+            raise ValueError("can't deserialize type with id {i}")
+
+
 def pack_dtype(t: np.dtype) -> bytes:
     """
     Store a dtype... or rather, store one of the few recognized dtypes.
 
     At the moment it's the current 3 sizes of float.
     """
-    match t:
-        case np.float16:
-            return struct.pack(">B", 16)
-        case np.float32:
-            return struct.pack(">B", 32)
-        case np.float64:
-            return struct.pack(">B", 64)
-        case _:
-            raise ValueError("can't serialize type {t}")
+    return struct.pack("B", dtype_to_int(t))
 
 
 def unpack_dtype(b: bytes, offset: int = 0) -> tuple[type, int]:
-    match struct.unpack_from(">B", b, offset)[0]:
-        case 16:
-            return (np.float16, offset + 1)
-        case 32:
-            return (np.float32, offset + 1)
-        case 64:
-            return (np.float64, offset + 1)
-        case _:
-            raise ValueError("value {_} doesn't map to a known numpy dtype")
+    i = struct.unpack_from("B", b, offset)[0]
+    return (int_to_dtype(i), offset + 1)
