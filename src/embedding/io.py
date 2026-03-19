@@ -204,7 +204,7 @@ def separate_usd(usdfile: str, outdir: str, verbose: bool = False) -> Package:
 
     headers: list[Header] = []
     for prim in stage.Traverse():
-        if not prim.IsA(UsdGeom.Mesh):  # type:ignore
+        if not prim.IsA(UsdGeom.Mesh):  # type: ignore
             continue
         mesh = UsdGeom.Mesh(prim)
         attr = mesh.GetPointsAttr()
@@ -304,11 +304,11 @@ def read_embedding(
     """
     Read an embedding and output the reconstructed data.
     """
-    (headersbin, projectedbin, clusterbin) = files
+    headersbin, projectedbin, clusterbin = files
 
     # Read the clusters
     with open(clusterbin, "rb") as f:
-        (cover, _) = clustering.Covering.from_bytes(f.read())
+        cover, _ = clustering.Covering.from_bytes(f.read())
     if verbose:
         print(
             f"Read cover with {cover.nsubsets} subsets and {len(cover.indices)} atoms"
@@ -325,8 +325,8 @@ def read_embedding(
     # Read the embedded data and invert it back to the original domain.
     slices: list[np.ndarray] = []
     for _ in range(cover.nsubsets):
-        (embed, headeroff) = embedding.deserialize(headerbytes, headeroff)
-        (projected, projectedoff) = embed.read_projection(projectedbytes, projectedoff)
+        embed, headeroff = embedding.deserialize(headerbytes, headeroff)
+        projected, projectedoff = embed.read_projection(projectedbytes, projectedoff)
         slices.append(embed.invert(projected))
 
     # The data is now sliced up, unslice it.

@@ -235,7 +235,7 @@ def cluster_monolithic(
 
     quality and cluster size are ignored.
     """
-    (nsamples, nverts, ndim) = data.shape
+    nsamples, nverts, ndim = data.shape
     indices = np.arange(nverts)
     return Covering.from_indices_and_counts(indices, np.array([len(indices)]))
 
@@ -255,7 +255,7 @@ def cluster_by_index(
     # The indices are just all the vertices one after the other.
     # We split the nverts as evenly as possible into nclusters, each of size
     # k except the last one.
-    (nsamples, nverts, ndim) = data.shape
+    nsamples, nverts, ndim = data.shape
     nclusters = 1 + ((nverts - 1) // cluster_size)
     k = int(round(nverts / nclusters))
     indices = np.arange(nverts)
@@ -279,7 +279,7 @@ def cluster_kmeans(
     """
     from sklearn.cluster import KMeans  # type: ignore
 
-    (nsamples, nverts, ndim) = data.shape
+    nsamples, nverts, ndim = data.shape
 
     # Translate each curve center to the origin
     centroid = data.sum(axis=0) / nsamples
@@ -310,7 +310,7 @@ def cluster_pca_kmeans(
     """
     from sklearn.cluster import KMeans  # type: ignore
 
-    (nsamples, nverts, ndim) = data.shape
+    nsamples, nverts, ndim = data.shape
 
     # Translate each curve center to the origin
     centroid = data.sum(axis=0) / nsamples
@@ -370,7 +370,7 @@ def _cluster_near_values(
     metric: T * T -> float
         # either side or both may be an array of T (as an np.ndarray)
     """
-    (nsamples, nverts, ndim) = data.shape
+    nsamples, nverts, ndim = data.shape
     epsilon = (1 - math.cos(quality)) / 2
     centroid = data.sum(axis=0) / nsamples
     M = data - centroid
@@ -459,7 +459,7 @@ def cluster_near_quaternions(
         U, s, Vt = np.linalg.svd(curve, full_matrices=False)
         # If Vt isn't 3x3 then make it 3x3. The singular values are sorted,
         # so keeping the first three dimensions keeps the best ones.
-        (n, m) = Vt.shape
+        n, m = Vt.shape
         if (n, m) != (3, 3):
             if (n >= 3) and (m >= 3):
                 # Simple case: just drop values.
@@ -501,7 +501,7 @@ def cluster_static_first(
 
     Returns the covering, with the first cluster being the static vertices if possible.
     """
-    (nsamples, nverts, ndim) = data.shape
+    nsamples, nverts, ndim = data.shape
 
     # Figure out which vertices go into the first cluster, namely those with
     # static values by vertex.

@@ -131,7 +131,7 @@ class _ClassMap:
         """
         Return an embedding class, and the new offset.
         """
-        (ID, offset) = unpack_small_uint(b, offset)
+        ID, offset = unpack_small_uint(b, offset)
         return (self.get_class(ID), offset)
 
 
@@ -154,7 +154,7 @@ def deserialize(b: bytes, offset: int = 0) -> tuple[Embedding, int]:
 
     Return the embedding and the new offset after reading it.
     """
-    (cls, offset) = _classmap.unpack_class(b, offset)
+    cls, offset = _classmap.unpack_class(b, offset)
     assert issubclass(cls, Embedding)
     return cls.from_bytes(b, offset)
 
@@ -201,10 +201,10 @@ class RawEmbedding(Embedding):
 
     @classmethod
     def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
-        (n, offset) = unpack_small_uint(b, offset)
-        (m, offset) = unpack_small_uint(b, offset)
-        (d, offset) = unpack_small_uint(b, offset)
-        (t, offset) = unpack_dtype(b, offset)
+        n, offset = unpack_small_uint(b, offset)
+        m, offset = unpack_small_uint(b, offset)
+        d, offset = unpack_small_uint(b, offset)
+        t, offset = unpack_dtype(b, offset)
         assert issubclass(t, np.number)
         return (RawEmbedding(n, m, d, t), offset)
 
@@ -249,7 +249,7 @@ class StaticEmbedding(Embedding):
 
         We do not check validity; use is_valid if you want that.
         """
-        (nsamples, nverts, ndim) = data.shape
+        nsamples, nverts, ndim = data.shape
         c = np.sum(data, axis=0) / nsamples
         return cls(c, nsamples)
 
@@ -258,7 +258,7 @@ class StaticEmbedding(Embedding):
         """
         Is the data actually static?
         """
-        (nsamples, nverts, ndim) = data.shape
+        nsamples, nverts, ndim = data.shape
         c = np.sum(data, axis=0) / nsamples
         M = data - c
         return np.max(np.fabs(M)) <= quality
@@ -296,10 +296,10 @@ class StaticEmbedding(Embedding):
         """
         Read the matrix size, type, and centroid.
         """
-        (n, offset) = unpack_small_uint(b, offset)
-        (m, offset) = unpack_small_uint(b, offset)
-        (d, offset) = unpack_small_uint(b, offset)
-        (t, offset) = unpack_dtype(b, offset)
+        n, offset = unpack_small_uint(b, offset)
+        m, offset = unpack_small_uint(b, offset)
+        d, offset = unpack_small_uint(b, offset)
+        t, offset = unpack_dtype(b, offset)
         assert issubclass(t, np.number)
         c = np.frombuffer(b, offset=offset, dtype=t, count=m * d)
         c = np.reshape(c, (m, d))
@@ -387,7 +387,7 @@ class FlatCenteredPCA:
         """
         if len(M.shape) != 2:
             raise ValueError(f"Shape {M.shape} should be a matrix")
-        (n, m) = M.shape
+        n, m = M.shape
         if not n or not m:
             raise ValueError(f"Empty matrix with shape {M.shape}")
         min_d = min(n, m)
@@ -496,10 +496,10 @@ class FlatCenteredPCA:
         Read from the bytes starting at offset, return an embedding
         and the new offset for the next read.
         """
-        (n, offset) = unpack_small_uint(b, offset)
-        (m, offset) = unpack_small_uint(b, offset)
-        (k, offset) = unpack_small_uint(b, offset)
-        (t, offset) = unpack_dtype(b, offset)
+        n, offset = unpack_small_uint(b, offset)
+        m, offset = unpack_small_uint(b, offset)
+        k, offset = unpack_small_uint(b, offset)
+        t, offset = unpack_dtype(b, offset)
         assert issubclass(t, np.number)
         tsize = t(0).itemsize
 
@@ -566,7 +566,7 @@ class AbstractPCAEmbedding(Embedding):
             raise ValueError(
                 f"Shape {data.shape} should have shape (nsamples, nverts, ndim)"
             )
-        (nsamples, nverts, ndim) = data.shape
+        nsamples, nverts, ndim = data.shape
         if not nsamples or not nverts or not ndim:
             raise ValueError(f"Empty matrix with shape {data.shape}")
 
@@ -625,7 +625,7 @@ class AbstractPCAEmbedding(Embedding):
         Read from the bytes starting at offset, return an embedding
         and the new offset for the next read.
         """
-        (pca, offset) = FlatCenteredPCA.from_bytes(b, offset)
+        pca, offset = FlatCenteredPCA.from_bytes(b, offset)
         m = pca.m
         t = pca.WVt.dtype
         tsize = t.itemsize
