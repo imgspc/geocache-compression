@@ -1,6 +1,7 @@
 import unittest
 
 from embedding.embedding import RawEmbedding, Embedding, StaticEmbedding
+from typing import Optional
 
 import numpy as np
 
@@ -15,7 +16,9 @@ class EmbeddingTestCase(unittest.TestCase):
         dtype=np.float32,
     )
 
-    def _basic_embedding_tests(self, cls, quality: float) -> bool:
+    def _basic_embedding_tests(
+        self, cls, quality: float, data: Optional[np.ndarray] = None
+    ) -> bool:
         """
         Basic tests on an embedding that should work on any subclass, using
         simple_data above.
@@ -24,7 +27,8 @@ class EmbeddingTestCase(unittest.TestCase):
         quality bound, otherwise True.
         """
         assert issubclass(cls, Embedding)
-        data = self.simple_data
+        if data is None:
+            data = self.simple_data
         if not cls.is_valid(data, quality):
             return False
         embed = cls.from_data(data, quality)
@@ -59,8 +63,17 @@ class EmbeddingTestCase(unittest.TestCase):
         self.assertTrue(np.all(inverted == self.simple_data))
 
     def test_static(self) -> None:
+        # The simple data is all within 1 unit. So it's not a valid static
+        # embedding at quality 1e-6 but it *is* valid at quality 1.
         is_valid = self._basic_embedding_tests(StaticEmbedding, quality=1e-6)
         self.assertFalse(is_valid)
 
         is_valid = self._basic_embedding_tests(StaticEmbedding, quality=1)
+        self.assertTrue(is_valid)
+
+        # It's also a valid static embedding at quality 1e-2 if I divide by 1000.
+        # (Divide by 100 and check for 1e-2 hits roundoff questions.)
+        is_valid = self._basic_embedding_tests(
+            StaticEmbedding, quality=1e-2, data=(self.simple_data / 1000)
+        )
         self.assertTrue(is_valid)
