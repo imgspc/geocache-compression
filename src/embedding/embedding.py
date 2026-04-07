@@ -163,21 +163,22 @@ class RawEmbedding(Embedding):
     """
     Ceci n'est pas un embedding.
 
-    This is just the identity; we store the data, and do nothing with it.
+    We store the data, rounded to the quality bound.
     """
 
-    def __init__(self, nsamples: int, nverts: int, ndim: int, dtype):
+    def __init__(self, nsamples: int, nverts: int, ndim: int, dtype, quality: float):
         self.nsamples = nsamples
         self.nverts = nverts
         self.ndim = ndim
         self.dtype = dtype
+        self.quality = quality
 
     @classmethod
     def from_data(
         cls, data: Domain, quality: float, verbose: bool = False
     ) -> Embedding:
         n, m, d = data.shape
-        return cls(n, m, d, data.dtype)
+        return cls(n, m, d, data.dtype, quality)
 
     @classmethod
     def is_valid(cls, data: np.ndarray, quality: float) -> bool:
@@ -196,6 +197,7 @@ class RawEmbedding(Embedding):
                 pack_small_uint(self.nverts),
                 pack_small_uint(self.ndim),
                 pack_dtype(self.dtype),
+                struct.pack(self.dtype.char, self.quality),
             )
         )
 
@@ -206,7 +208,10 @@ class RawEmbedding(Embedding):
         d, offset = unpack_small_uint(b, offset)
         t, offset = unpack_dtype(b, offset)
         assert issubclass(t, np.number)
-        return (RawEmbedding(n, m, d, t), offset)
+        fmt = np.dtype(t).char
+        (q,) = struct.unpack_from(fmt, b, offset)
+        offset += struct.calcsize(fmt)
+        return (RawEmbedding(n, m, d, t, q), offset)
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
         ndata = self.nsamples * self.nverts * self.ndim
