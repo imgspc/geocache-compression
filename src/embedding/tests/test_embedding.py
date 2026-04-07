@@ -1,6 +1,11 @@
 import unittest
 
-from embedding.embedding import RawEmbedding, Embedding, StaticEmbedding
+from embedding.embedding import (
+    Embedding,
+    PCAConfigurationSpaceEmbedding,
+    RawEmbedding,
+    StaticEmbedding,
+)
 from typing import Optional
 
 import numpy as np
@@ -39,17 +44,18 @@ class EmbeddingTestCase(unittest.TestCase):
         embed2, offset = cls.from_bytes(b)
         self.assertEqual(offset, len(b))
 
-        b = projected.tobytes()
+        b = embed2.write_projection(projected)
         projected2, offset = embed2.read_projection(b)
         self.assertEqual(offset, len(b))
+        self.assertTrue(np.allclose(projected2, projected, rtol=0, atol=quality))
 
-        self.assertTrue(np.allclose(projected, projected2, rtol=0, atol=quality))
         inverted2 = embed2.invert(projected2)
+        self.assertTrue(np.allclose(inverted2, inverted, rtol=0, atol=quality))
         self.assertTrue(np.allclose(inverted2, data, rtol=0, atol=quality))
 
         return True
 
-    def test_raw(self) -> None:
+    def test_embedding_raw(self) -> None:
         is_valid = self._basic_embedding_tests(RawEmbedding, quality=1e-6)
         self.assertTrue(is_valid)
 
@@ -62,7 +68,7 @@ class EmbeddingTestCase(unittest.TestCase):
         inverted = raw.invert(projected)
         self.assertTrue(np.all(inverted == self.simple_data))
 
-    def test_static(self) -> None:
+    def test_embedding_static(self) -> None:
         # The simple data is all within 1 unit. So it's not a valid static
         # embedding at quality 1e-6 but it *is* valid at quality 1.
         is_valid = self._basic_embedding_tests(StaticEmbedding, quality=1e-6)
@@ -75,5 +81,11 @@ class EmbeddingTestCase(unittest.TestCase):
         # (Divide by 100 and check for 1e-2 hits roundoff questions.)
         is_valid = self._basic_embedding_tests(
             StaticEmbedding, quality=1e-2, data=(self.simple_data / 1000)
+        )
+        self.assertTrue(is_valid)
+
+    def test_embedding_pca_configuration(self) -> None:
+        is_valid = self._basic_embedding_tests(
+            PCAConfigurationSpaceEmbedding, quality=1e-6
         )
         self.assertTrue(is_valid)
