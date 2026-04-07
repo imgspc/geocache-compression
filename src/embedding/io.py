@@ -286,7 +286,7 @@ def create_embedding(
             for cluster, embed in zip(clusters, embeddings):
                 headerfile.write(embedding.serialize(embed))
                 projected = embed.project(cluster)
-                projectedfile.write(projected.tobytes())
+                projectedfile.write(embed.write_projection(projected))
             projectedfilesize = projectedfile.tell()
         headerfilesize = headerfile.tell()
     with open(clusterbin, "wb") as clusterfile:

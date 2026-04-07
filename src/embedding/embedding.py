@@ -83,15 +83,21 @@ class Embedding(ABC):
         ...
 
     @abstractmethod
+    def write_projection(self, projected: Reduced) -> bytes:
+        """
+        Convert the projected data to some bytes.
+
+        Use read_projection to convert the bytes back to the domain.
+        """
+        ...
+
+    @abstractmethod
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
         """
         Read some data projected according to this embedding from a bytes object,
         starting at the offset.
 
         Output the reduced-dimension ndarray and the new offset to start reading from.
-
-        Note: to *write* the projected data, simply use data.tobytes()
-        where data came from the `project` function.
         """
         ...
 
@@ -213,6 +219,9 @@ class RawEmbedding(Embedding):
         offset += struct.calcsize(fmt)
         return (RawEmbedding(n, m, d, t, q), offset)
 
+    def write_projection(self, projected: Reduced) -> bytes:
+        return projected.tobytes()
+
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
         ndata = self.nsamples * self.nverts * self.ndim
         flatdata = np.frombuffer(b, offset=offset, dtype=self.dtype, count=ndata)
@@ -311,6 +320,10 @@ class StaticEmbedding(Embedding):
         tsize = c.itemsize
         offset += tsize * m * d
         return (StaticEmbedding(c, n), offset)
+
+    def write_projection(self, projected: Reduced) -> bytes:
+        # There is no projection; write nothing.
+        return b""
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
         """
@@ -644,6 +657,9 @@ class AbstractPCAEmbedding(Embedding):
         c = np.reshape(c, (m // ndim, ndim))
 
         return (cls(pca, c), offset)
+
+    def write_projection(self, projected: Reduced) -> bytes:
+        return projected.tobytes()
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
         return self.pca.read_projection(b, offset)
