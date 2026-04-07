@@ -5,6 +5,7 @@ from embedding.embedding import (
     PCAConfigurationSpaceEmbedding,
     RawEmbedding,
     StaticEmbedding,
+    best_embedding,
 )
 from typing import Optional
 
@@ -15,11 +16,33 @@ class EmbeddingTestCase(unittest.TestCase):
     simple_data = np.array(
         [
             [[0, 1], [5, 3]],
-            [[0.5, 1.5], [6, 2]],
+            [[0.6, 1.4], [6, 2]],
             [[1, 2], [7, 1]],
         ],
         dtype=np.float32,
     )
+
+    def _complex_data(self) -> np.ndarray:
+        # we have three vectors; we generate three vertices, each one goes
+        # linearly along each vector for 30 frames starting at [10,0,-10]
+        # configuration space will need 2 configurations; geometry will need 3 lines
+        v1 = np.array([1, 1, 1])
+        v2 = np.array([0.5, 0.5, 1])
+        v3 = np.array([-1, 1, -1])
+        origin = np.array([10, 0, -10])
+
+        def p1(t) -> np.ndarray:
+            return origin + t * v1
+
+        def p2(t) -> np.ndarray:
+            return origin + t * v2
+
+        def p3(t) -> np.ndarray:
+            return origin + t * v3
+
+        data = [(p1(t), p2(t), p3(t)) for t in range(30)]
+
+        return np.array(data)
 
     def _basic_embedding_tests(
         self, cls, quality: float, data: Optional[np.ndarray] = None
@@ -89,3 +112,17 @@ class EmbeddingTestCase(unittest.TestCase):
             PCAConfigurationSpaceEmbedding, quality=1e-6
         )
         self.assertTrue(is_valid)
+
+    def test_best_embedding(self) -> None:
+        # we'll need 2 configurations + centroid makes 3 frames of data for PCA
+        embed = best_embedding(self.simple_data, quality=1e-6)
+        self.assertIsInstance(embed, RawEmbedding)
+
+        # All the data is within distance 1 of the centre so we can go static, which is 1 frame.
+        embed = best_embedding(self.simple_data, quality=1)
+        self.assertIsInstance(embed, StaticEmbedding)
+
+        # The "complex" data shrinks to almost nothing under PCA: just 1 frame + centroid
+        # rather than 30 frames raw.
+        embed = best_embedding(self._complex_data(), quality=1e-2)
+        self.assertIsInstance(embed, PCAConfigurationSpaceEmbedding)

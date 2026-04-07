@@ -706,7 +706,7 @@ def best_embedding(
         if candidate.is_valid(data, quality)
     ]
     lengths = [
-        len(embed.tobytes()) + len(embed.project(data).tobytes())
+        len(embed.tobytes()) + len(embed.write_projection(embed.project(data)))
         for embed in embeddings
     ]
     ordered = sorted(zip(embeddings, lengths), key=lambda el: el[1])
