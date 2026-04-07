@@ -24,7 +24,11 @@ def temp_filename():
 
 
 def epsilon_to_decimals(epsilon: float) -> int:
+    # This function is far from any critical path; should be possible to do it
+    # much faster if necessary.
     n = 0
+    if epsilon <= 0 or math.isnan(epsilon):
+        raise ValueError(f"{epsilon} must be strictly positive")
     while epsilon < 1:
         n += 1
         epsilon *= 10
@@ -40,6 +44,11 @@ class ApproximatedStream:
     def __init__(
         self, epsilon: float, stream: np.ndarray, decimals: Optional[int] = None
     ):
+        """
+        Create an ApproximatedStream for the data, with the given error bound epsilon.
+
+        Epsilon is ignored if `decimals` is provided.
+        """
         if len(stream.shape) > 1:
             raise ValueError(f"Shape must be flat, not {stream.shape}")
         if decimals is None and (epsilon <= 0 or not math.isfinite(epsilon)):
