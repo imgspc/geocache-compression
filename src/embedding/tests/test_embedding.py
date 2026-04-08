@@ -114,7 +114,7 @@ class EmbeddingTestCase(unittest.TestCase):
         self.assertTrue(is_valid)
 
     def test_best_embedding(self) -> None:
-        # we'll need 2 configurations + centroid makes 3 frames of data for PCA
+        # we'll need 2 configurations + centroid makes 3 frames of data for PCA. That's more than raw.
         embed = best_embedding(self.simple_data, quality=1e-6)
         self.assertIsInstance(embed, RawEmbedding)
 

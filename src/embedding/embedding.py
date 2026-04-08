@@ -236,11 +236,9 @@ class StaticEmbedding(Embedding):
     """
     Embedding vertices that aren't moving.
 
-    We store the centroid, and that's what we return for all frames.
+    We store the bounding box center, and that's what we return for all frames.
 
-    If the input is actually not static, then the errors are going to be
-    the distance from the actual data to the centroid. If that's a problem,
-    use another embedding!
+    This embedding minimizes L_inf error, not L_2 error.
     """
 
     def __init__(self, c: np.ndarray, nsamples: int):
@@ -248,11 +246,20 @@ class StaticEmbedding(Embedding):
         Most users will want to use `from_data` or `from_bytes` rather than directly
         using the constructor.
 
-        c is the centroid, shape (1, nverts, ndim)
+        c is the centre, shape (1, nverts, ndim)
         nsamples is the number of rows in the original data
         """
         self.c = c
         self.nsamples = nsamples
+
+    @classmethod
+    def _bbox(cls, data: Domain) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Return the bounding box of the data: the minimum and maximum.
+        """
+        minimum = np.min(data, axis=0)
+        maximum = np.max(data, axis=0)
+        return (minimum, maximum)
 
     @classmethod
     def from_data(
@@ -263,8 +270,9 @@ class StaticEmbedding(Embedding):
 
         We do not check validity; use is_valid if you want that.
         """
-        nsamples, nverts, ndim = data.shape
-        c = np.sum(data, axis=0) / nsamples
+        minimum, maximum = cls._bbox(data)
+        c = 0.5 * (minimum + maximum)
+        nsamples, _, __ = data.shape
         return cls(c, nsamples)
 
     @classmethod
@@ -272,10 +280,10 @@ class StaticEmbedding(Embedding):
         """
         Is the data actually static?
         """
-        nsamples, nverts, ndim = data.shape
-        c = np.sum(data, axis=0) / nsamples
-        M = data - c
-        return np.max(np.fabs(M)) <= quality
+        minimum, maximum = cls._bbox(data)
+        # max-min is the diameter, quality is the maximum radius
+        is_in_quality = (maximum - minimum) <= 2 * quality
+        return bool(np.all(is_in_quality))
 
     def project(self, data: Domain) -> Reduced:
         """
@@ -286,13 +294,13 @@ class StaticEmbedding(Embedding):
     def invert(self, data: Reduced) -> Domain:
         """
         Invert the lower-dimensional space (an empty vector) back to the original space,
-        i.e. return the centroid repeated every frame.
+        i.e. return the centre repeated every frame.
         """
         return np.tile(self.c, (self.nsamples, 1, 1))
 
     def tobytes(self) -> bytes:
         """
-        Write the matrix size, type, and centroid.
+        Write the matrix size, type, and centre.
         """
         nverts, ndim = self.c.shape
         return b"".join(
@@ -308,7 +316,7 @@ class StaticEmbedding(Embedding):
     @classmethod
     def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
         """
-        Read the matrix size, type, and centroid.
+        Read the matrix size, type, and centre.
         """
         n, offset = unpack_small_uint(b, offset)
         m, offset = unpack_small_uint(b, offset)
@@ -322,7 +330,9 @@ class StaticEmbedding(Embedding):
         return (StaticEmbedding(c, n), offset)
 
     def write_projection(self, projected: Reduced) -> bytes:
-        # There is no projection; write nothing.
+        """
+        Return an empty bytes object, since there is no projection.
+        """
         return b""
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
