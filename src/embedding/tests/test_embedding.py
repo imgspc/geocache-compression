@@ -82,7 +82,7 @@ class EmbeddingTestCase(unittest.TestCase):
         is_valid = self._basic_embedding_tests(RawEmbedding, quality=1e-6)
         self.assertTrue(is_valid)
 
-        # Now test that actually the raw embedding is actually the identity
+        # Test that actually the raw embedding is actually the identity
         # transform.  Not only close, but identical! Serialization may cause
         # rounding, is all.
         raw = RawEmbedding.from_data(self.simple_data, quality=1)

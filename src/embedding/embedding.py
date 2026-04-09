@@ -6,6 +6,7 @@ import struct
 import math
 
 from .util import pack_small_uint, unpack_small_uint, pack_dtype, unpack_dtype
+from .encoding import ApproximatedStream, epsilon_to_decimals
 
 from typing import Union, Optional
 from numpy.typing import DTypeLike
@@ -220,15 +221,71 @@ class RawEmbedding(Embedding):
         return (RawEmbedding(n, m, d, t, q), offset)
 
     def write_projection(self, projected: Reduced) -> bytes:
-        return projected.tobytes()
+        # Compress coordinates of each vertex as independent time series.
+        # Also try not compressing them. Store 1 bit per column for whether it got compressed.
+        nsamples, nverts, ndim = projected.shape
+        # TODO: parallelize! Since this launches a process and consumes file
+        # descriptors etc, it's a bit complicated to do that, so I don't right now.
+        decimals = epsilon_to_decimals(self.quality)
+
+        def write_column(v: int, d: int) -> tuple[bytes, bool]:
+            column = projected[:, v, d]
+            stream = ApproximatedStream(self.quality, column, decimals=decimals)
+            compressed = stream.tobytes_dataonly()
+            raw = column.tobytes()
+            if len(raw) <= len(compressed):
+                return (raw, False)
+            else:
+                return (compressed, True)
+
+        columns = [write_column(v, d) for v in range(nverts) for d in range(ndim)]
+        streams, choices = zip(*columns)
+        packed_choice = np.packbits(choices)
+        return b"".join([packed_choice.tobytes(), *streams])
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
-        ndata = self.nsamples * self.nverts * self.ndim
-        flatdata = np.frombuffer(b, offset=offset, dtype=self.dtype, count=ndata)
-        tsize = flatdata.itemsize
-        offset += tsize * ndata
+        decimals = epsilon_to_decimals(self.quality)
 
-        data = np.reshape(flatdata, (self.nsamples, self.nverts, self.ndim))
+        # ceil(nverts * ndim / 8) is the number of bytes that we need for one bit
+        # per column. We also need to know how many bits we actually want to keep,
+        # since there may be up to 7 extras.
+        nchoicebytes = (self.nverts * self.ndim - 1) // 8 + 1
+        nchoicebits = self.nverts * self.ndim
+        packed_choice = np.frombuffer(
+            b, offset=offset, dtype=np.uint8, count=nchoicebytes
+        )
+        offset += nchoicebytes
+        choice = np.unpackbits(packed_choice, count=nchoicebits).reshape(
+            self.nverts, self.ndim
+        )
+
+        def read_column(v, d, b, offset) -> tuple[np.ndarray, int]:
+            """
+            Read the column for vertex v dimension d, i.e. the values of one coordinate over time.
+
+            Return the column and the offset pointing to the next column.
+            """
+            if choice[v, d]:
+                stream, offset = ApproximatedStream.from_bytes_dataonly(
+                    self.dtype, decimals, b, offset
+                )
+                column = np.frombuffer(
+                    stream.stream, dtype=self.dtype, count=self.nsamples
+                )
+            else:
+                column = np.frombuffer(
+                    b, offset=offset, dtype=self.dtype, count=self.nsamples
+                )
+                offset += self.nsamples * column.itemsize
+            return column, offset
+
+        columns = []
+        for v in range(self.nverts):
+            for d in range(self.ndim):
+                col, offset = read_column(v, d, b, offset)
+                columns.append(col)
+        data = np.array(columns).reshape(self.nverts, self.ndim, self.nsamples)
+        data = data.transpose(2, 0, 1)
         return (data, offset)
 
 
