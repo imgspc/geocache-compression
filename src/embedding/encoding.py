@@ -60,7 +60,7 @@ class ApproximatedStream:
         else:
             self.decimals = epsilon_to_decimals(epsilon)
 
-    def tobytes_dataonly(self) -> bytes:
+    def tobytes_dataonly(self, verbose=False) -> bytes:
         """
         Return the bytes just of the data stream.
 
@@ -76,17 +76,20 @@ class ApproximatedStream:
                 binfile.close()
                 neatsfile.close()
 
-                subprocess.run(
-                    [
-                        neats_compress,
-                        binfile.name,
-                        "-o",
-                        neatsfile.name,
-                        "-d",
-                        str(self.decimals),
-                        "-s",
-                    ]
-                )
+                args = [
+                    neats_compress,
+                    binfile.name,
+                    "-o",
+                    neatsfile.name,
+                    "-d",
+                    str(self.decimals),
+                    "-s",
+                ]
+                if verbose:
+                    subprocess.run(args)
+                else:
+                    subprocess.run(args, stdout=subprocess.DEVNULL)
+
                 with open(neatsfile.name, "rb") as f:
                     b = f.read()
                 length = struct.pack("<I", len(b))
@@ -94,7 +97,7 @@ class ApproximatedStream:
 
     @staticmethod
     def from_bytes_dataonly(
-        dtype: type, decimals: int, b: bytes, offset: int
+        dtype: type, decimals: int, b: bytes, offset: int, verbose=False
     ) -> tuple[ApproximatedStream, int]:
         """
         Read the data from the bytes, using a known header.
@@ -109,24 +112,32 @@ class ApproximatedStream:
                 neatsfile.close()
                 binfile.close()
 
-                subprocess.run([neats_decompress, neatsfile.name, "-o", binfile.name])
+                args = [neats_decompress, neatsfile.name, "-o", binfile.name]
+                if verbose:
+                    subprocess.run(args)
+                else:
+                    subprocess.run(args, stdout=subprocess.DEVNULL)
                 uncompressed: np.ndarray = np.fromfile(binfile.name, dtype=dtype)
 
         astream = ApproximatedStream(0, uncompressed, decimals)
         return (astream, offset)
 
-    def tobytes(self) -> bytes:
+    def tobytes(self, verbose=False) -> bytes:
         return b"".join(
             [
                 pack_dtype(self.stream.dtype),
                 pack_small_uint(self.decimals),
-                self.tobytes_dataonly(),
+                self.tobytes_dataonly(verbose),
             ]
         )
 
     @staticmethod
-    def from_bytes(b: bytes, offset: int) -> tuple[ApproximatedStream, int]:
+    def from_bytes(
+        b: bytes, offset: int, verbose=False
+    ) -> tuple[ApproximatedStream, int]:
         dt, offset = unpack_dtype(b, offset)
         assert issubclass(dt, np.number)
         decimals, offset = unpack_small_uint(b, offset)
-        return ApproximatedStream.from_bytes_dataonly(dt, decimals, b, offset)
+        return ApproximatedStream.from_bytes_dataonly(
+            dt, decimals, b, offset, verbose=verbose
+        )
