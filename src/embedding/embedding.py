@@ -221,25 +221,37 @@ class RawEmbedding(Embedding):
         return (RawEmbedding(n, m, d, t, q), offset)
 
     def write_projection(self, projected: Reduced) -> bytes:
-        # Compress coordinates of each vertex as independent time series.
-        # Also try not compressing them. Store 1 bit per column for whether it got compressed.
+        # First, transpose the values to be ndim x nsamples x nverts.
+        # Then, reshape so that we have ndim vectors each corresponding to e.g.
+        # the X values of the first vertex over time, followed by the X values
+        # of the second vertex, etc.
+        #
+        # Finally we compress each column and see if that gained us space. If not, we
+        # write it uncompressed.
+        #
+        # Overall the bytes we output are:
+        # * first a bitmask for whether each stream is compressed
+        # * each stream, one by one, compressed if helpful
+        # We do not store the sizes because the header already has that.
         nsamples, nverts, ndim = projected.shape
-        # TODO: parallelize! Since this launches a process and consumes file
-        # descriptors etc, it's a bit complicated to do that, so I don't right now.
-        decimals = epsilon_to_decimals(self.quality)
 
-        def write_column(v: int, d: int) -> tuple[bytes, bool]:
-            column = projected[:, v, d]
-            stream = ApproximatedStream(self.quality, column, decimals=decimals)
+        reordered = projected.transpose(2, 0, 1)
+        by_dimension = reordered.reshape(ndim, nsamples * nverts)
+
+        def write_column(d: int) -> tuple[bytes, bool]:
+            column = by_dimension[d, :]
+            stream = ApproximatedStream(self.quality, column)
             compressed = stream.tobytes_dataonly()
             raw = column.tobytes()
+            print(f"dimension {d}: {len(raw)} raw vs {len(compressed)} compressed")
             if len(raw) <= len(compressed):
                 return (raw, False)
             else:
                 return (compressed, True)
 
-        columns = [write_column(v, d) for v in range(nverts) for d in range(ndim)]
+        columns = [write_column(d) for d in range(ndim)]
         streams, choices = zip(*columns)
+        print(f"Compression choices: {choices}")
         packed_choice = np.packbits(choices)
         return b"".join([packed_choice.tobytes(), *streams])
 
@@ -249,43 +261,43 @@ class RawEmbedding(Embedding):
         # ceil(nverts * ndim / 8) is the number of bytes that we need for one bit
         # per column. We also need to know how many bits we actually want to keep,
         # since there may be up to 7 extras.
-        nchoicebytes = (self.nverts * self.ndim - 1) // 8 + 1
-        nchoicebits = self.nverts * self.ndim
+        nchoicebytes = (self.ndim - 1) // 8 + 1
         packed_choice = np.frombuffer(
             b, offset=offset, dtype=np.uint8, count=nchoicebytes
         )
         offset += nchoicebytes
-        choice = np.unpackbits(packed_choice, count=nchoicebits).reshape(
-            self.nverts, self.ndim
-        )
+        choice = np.unpackbits(packed_choice, count=self.ndim)
 
-        def read_column(v, d, b, offset) -> tuple[np.ndarray, int]:
+        def read_coordinate(d, b, offset) -> tuple[np.ndarray, int]:
             """
-            Read the column for vertex v dimension d, i.e. the values of one coordinate over time.
+            Read the values of the coordinate in dimension d. d=0 would be all
+            the X values, etc.
 
-            Return the column and the offset pointing to the next column.
+            Return an array of shape nsamples x nverts, as well as the offset for
+            further reading from the stream.
             """
-            if choice[v, d]:
+            n = self.nsamples * self.nverts
+            if choice[d]:
                 stream, offset = ApproximatedStream.from_bytes_dataonly(
                     self.dtype, decimals, b, offset
                 )
-                column = np.frombuffer(
-                    stream.stream, dtype=self.dtype, count=self.nsamples
-                )
+                data = np.frombuffer(stream.stream, dtype=self.dtype, count=n)
             else:
-                column = np.frombuffer(
-                    b, offset=offset, dtype=self.dtype, count=self.nsamples
-                )
-                offset += self.nsamples * column.itemsize
-            return column, offset
+                data = np.frombuffer(b, offset=offset, dtype=self.dtype, count=n)
+                offset += n * data.itemsize
+            # Data is 1d, with all the data for v1, then all the data for v2, etc.
+            # In other words, each column is a time sample, each row is a vertex.
+            # (reading in C order)
+            values = data.reshape((self.nsamples, self.nverts))
+            return values, offset
 
-        columns = []
-        for v in range(self.nverts):
-            for d in range(self.ndim):
-                col, offset = read_column(v, d, b, offset)
-                columns.append(col)
-        data = np.array(columns).reshape(self.nverts, self.ndim, self.nsamples)
-        data = data.transpose(2, 0, 1)
+        # coords has shape ndim, nsamples, nverts
+        coords = []
+        for d in range(self.ndim):
+            coord, offset = read_coordinate(d, b, offset)
+            coords.append(coord)
+        # convert to shape nsamples, nverts, ndim
+        data = np.array(coords).transpose(1, 2, 0)
         return (data, offset)
 
 

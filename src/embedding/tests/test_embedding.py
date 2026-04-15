@@ -1,5 +1,7 @@
 import unittest
 
+import numpy as np
+
 from embedding.embedding import (
     Embedding,
     PCAConfigurationSpaceEmbedding,
@@ -7,9 +9,9 @@ from embedding.embedding import (
     StaticEmbedding,
     best_embedding,
 )
-from typing import Optional
+from embedding.tests.test_data import complex_data
 
-import numpy as np
+from typing import Optional
 
 
 class EmbeddingTestCase(unittest.TestCase):
@@ -21,28 +23,6 @@ class EmbeddingTestCase(unittest.TestCase):
         ],
         dtype=np.float32,
     )
-
-    def _complex_data(self) -> np.ndarray:
-        # we have three vectors; we generate three vertices, each one goes
-        # linearly along each vector for 30 frames starting at [10,0,-10]
-        # configuration space will need 2 configurations; geometry will need 3 lines
-        v1 = np.array([1, 1, 1])
-        v2 = np.array([0.5, 0.5, 1])
-        v3 = np.array([-1, 1, -1])
-        origin = np.array([10, 0, -10])
-
-        def p1(t) -> np.ndarray:
-            return origin + t * v1
-
-        def p2(t) -> np.ndarray:
-            return origin + t * v2
-
-        def p3(t) -> np.ndarray:
-            return origin + t * v3
-
-        data = [(p1(t), p2(t), p3(t)) for t in range(30)]
-
-        return np.array(data)
 
     def _basic_embedding_tests(
         self, cls, quality: float, data: Optional[np.ndarray] = None
@@ -82,10 +62,8 @@ class EmbeddingTestCase(unittest.TestCase):
         is_valid = self._basic_embedding_tests(RawEmbedding, quality=1e-6)
         self.assertTrue(is_valid)
 
-        # Test that actually the raw embedding is actually the identity
-        # transform.  Not only close, but identical! Serialization may cause
-        # rounding, is all.
-        raw = RawEmbedding.from_data(self.simple_data, quality=1)
+        # Given rounding to the nearest 0.01 we should get exact results.
+        raw = RawEmbedding.from_data(self.simple_data, quality=1e-2)
         projected = raw.project(self.simple_data)
         self.assertTrue(np.all(projected == self.simple_data))
         inverted = raw.invert(projected)
@@ -122,7 +100,7 @@ class EmbeddingTestCase(unittest.TestCase):
         embed = best_embedding(self.simple_data, quality=1)
         self.assertIsInstance(embed, StaticEmbedding)
 
-        # The "complex" data shrinks to almost nothing under PCA: just 1 frame + centroid
+        # The "complex" data shrinks to almost nothing under PCA: just centroid + final frame
         # rather than 30 frames raw.
-        embed = best_embedding(self._complex_data(), quality=1e-2)
+        embed = best_embedding(complex_data(), quality=1e-2)
         self.assertIsInstance(embed, PCAConfigurationSpaceEmbedding)
