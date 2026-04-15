@@ -1,6 +1,9 @@
 import unittest
 from embedding import clustering
 import numpy as np
+import math
+
+from embedding.tests.test_data import complex_data
 
 
 class ClusteringTestCase(unittest.TestCase):
@@ -26,3 +29,20 @@ class ClusteringTestCase(unittest.TestCase):
         # TODO: multiple subsets
         # TODO: the various constructors
         # TODO: serialization
+
+    def test_covering_by_index(self) -> None:
+        csize = 11
+        covering = clustering.cluster_by_index(
+            complex_data(), quality=1, cluster_size=csize
+        )
+        # Ensure not too many subsets. 3000 is 3 * 1000 from default settings from complex_data
+        self.assertEqual(covering.nsubsets, math.ceil(3000 / csize))
+
+        # Ensure no subset is too large.
+        spare = 0
+        for subset in covering.subsets:
+            self.assertTrue(len(subset) <= csize)
+            spare += csize - len(subset)
+
+        # Ensure again that we don't have too many subsets.
+        self.assertTrue(spare < csize)

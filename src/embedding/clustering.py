@@ -253,14 +253,18 @@ def cluster_by_index(
     quality is ignored.
     """
     # The indices are just all the vertices one after the other.
-    # We split the nverts as evenly as possible into nclusters, each of size
-    # k except the last one.
+    # First, figure out how many clusters we need in order to have
+    # at most cluster_size verts in each one.
+    # Then distribute them evenly, keeping the remainder in a pile.
+    # Finally, distribute the pile as one per cluster until we run out.
     nsamples, nverts, ndim = data.shape
     nclusters = 1 + ((nverts - 1) // cluster_size)
-    k = int(round(nverts / nclusters))
+    k = nverts // nclusters
+    remainder = nverts % nclusters
     indices = np.arange(nverts)
-    offsets = indices[k:nverts:k]
-    return Covering(indices, offsets)
+    counts = np.zeros(nclusters, dtype=int) + k
+    counts[:remainder] += 1
+    return Covering.from_indices_and_counts(indices, counts)
 
 
 def cluster_kmeans(
