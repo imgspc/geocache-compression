@@ -19,27 +19,16 @@ class EncodingTestCase(unittest.TestCase):
             self.assertTrue(os.path.exists(fname))
         self.assertFalse(os.path.exists(fname))
 
-    def test_epsilon_to_decimals(self) -> None:
-        self.assertEqual(0, encoding.epsilon_to_decimals(10))
-        self.assertEqual(1, encoding.epsilon_to_decimals(0.9))
-        self.assertEqual(1, encoding.epsilon_to_decimals(0.1))
-        self.assertEqual(2, encoding.epsilon_to_decimals(0.01))
-        self.assertEqual(3, encoding.epsilon_to_decimals(0.001))
-        self.assertEqual(4, encoding.epsilon_to_decimals(0.0001))
-        self.assertEqual(5, encoding.epsilon_to_decimals(0.00001))
-        self.assertEqual(6, encoding.epsilon_to_decimals(0.000001))
-
     @unittest.expectedFailure
     def test_roundtrip_exact(self) -> None:
         data = np.arange(1235, dtype=np.float32)
-        stream = encoding.ApproximatedStream(0.1, data)
+        stream = encoding.ApproximatedStream(data, 0.1)
         encoded = stream.tobytes(verbose=True)
         newstream, offset = encoding.ApproximatedStream.from_bytes(
             encoded, verbose=True
         )
         self.assertEqual(offset, len(encoded))
         decodeddata = newstream.stream
-        self.assertEqual(newstream.decimals, stream.decimals)
         print(f"data: {data}")
         print(f"decoded: {decodeddata}")
         print(f"diff: {decodeddata - data}")

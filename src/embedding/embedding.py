@@ -6,7 +6,7 @@ import struct
 import math
 
 from .util import pack_small_uint, unpack_small_uint, pack_dtype, unpack_dtype
-from .encoding import ApproximatedStream, epsilon_to_decimals
+from .encoding import ApproximatedStream
 
 from typing import Union, Optional
 from numpy.typing import DTypeLike
@@ -240,7 +240,7 @@ class RawEmbedding(Embedding):
 
         def write_column(d: int) -> tuple[bytes, bool]:
             column = by_dimension[d, :]
-            stream = ApproximatedStream(self.quality, column)
+            stream = ApproximatedStream(column, self.quality)
             compressed = stream.tobytes_dataonly()
             raw = column.tobytes()
             print(f"dimension {d}: {len(raw)} raw vs {len(compressed)} compressed")
@@ -256,8 +256,6 @@ class RawEmbedding(Embedding):
         return b"".join([packed_choice.tobytes(), *streams])
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
-        decimals = epsilon_to_decimals(self.quality)
-
         # ceil(nverts * ndim / 8) is the number of bytes that we need for one bit
         # per column. We also need to know how many bits we actually want to keep,
         # since there may be up to 7 extras.
@@ -279,7 +277,7 @@ class RawEmbedding(Embedding):
             n = self.nsamples * self.nverts
             if choice[d]:
                 stream, offset = ApproximatedStream.from_bytes_dataonly(
-                    self.dtype, decimals, b, offset
+                    self.dtype, b, offset
                 )
                 data = np.frombuffer(stream.stream, dtype=self.dtype, count=n)
             else:
