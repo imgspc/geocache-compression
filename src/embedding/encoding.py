@@ -11,8 +11,8 @@ from pathlib import Path
 from .util import pack_small_uint, unpack_small_uint, pack_dtype, unpack_dtype
 
 neats_dir = Path.home() / "projects/geocache-compression/build/neats"
-neats_compress = neats_dir / "neats_compress"
-neats_decompress = neats_dir / "neats_decompress"
+neats_compress = neats_dir / "neats_lossy_compress"
+neats_decompress = neats_dir / "neats_lossy_decompress"
 
 
 def temp_filename():
@@ -83,7 +83,6 @@ class ApproximatedStream:
                     neatsfile.name,
                     "-d",
                     str(self.decimals),
-                    "-s",
                 ]
                 if verbose:
                     subprocess.run(args)
@@ -133,7 +132,7 @@ class ApproximatedStream:
 
     @staticmethod
     def from_bytes(
-        b: bytes, offset: int, verbose=False
+        b: bytes, offset: int = 0, verbose=False
     ) -> tuple[ApproximatedStream, int]:
         dt, offset = unpack_dtype(b, offset)
         assert issubclass(dt, np.number)
