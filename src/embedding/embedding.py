@@ -243,7 +243,6 @@ class RawEmbedding(Embedding):
             stream = ApproximatedStream(column, self.quality)
             compressed = stream.tobytes_dataonly()
             raw = column.tobytes()
-            print(f"dimension {d}: {len(raw)} raw vs {len(compressed)} compressed")
             if len(raw) <= len(compressed):
                 return (raw, False)
             else:
@@ -251,7 +250,6 @@ class RawEmbedding(Embedding):
 
         columns = [write_column(d) for d in range(ndim)]
         streams, choices = zip(*columns)
-        print(f"Compression choices: {choices}")
         packed_choice = np.packbits(choices)
         return b"".join([packed_choice.tobytes(), *streams])
 
