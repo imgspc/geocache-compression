@@ -6,7 +6,7 @@ import struct
 import math
 
 from .util import pack_small_uint, unpack_small_uint, pack_dtype, unpack_dtype
-from .encoding import ApproximatedStream
+from .encoding import ApproximatedStream, encode_coordinates, decode_coordinates
 
 from typing import Union, Optional
 from numpy.typing import DTypeLike
@@ -173,7 +173,9 @@ class RawEmbedding(Embedding):
     We store the data, rounded to the quality bound.
     """
 
-    def __init__(self, nsamples: int, nverts: int, ndim: int, dtype, quality: float):
+    def __init__(
+        self, nsamples: int, nverts: int, ndim: int, dtype, quality: Optional[float]
+    ):
         self.nsamples = nsamples
         self.nverts = nverts
         self.ndim = ndim
@@ -204,7 +206,6 @@ class RawEmbedding(Embedding):
                 pack_small_uint(self.nverts),
                 pack_small_uint(self.ndim),
                 pack_dtype(self.dtype),
-                struct.pack(self.dtype.char, self.quality),
             )
         )
 
@@ -214,72 +215,19 @@ class RawEmbedding(Embedding):
         m, offset = unpack_small_uint(b, offset)
         d, offset = unpack_small_uint(b, offset)
         t, offset = unpack_dtype(b, offset)
-        assert issubclass(t, np.number)
-        fmt = np.dtype(t).char
-        (q,) = struct.unpack_from(fmt, b, offset)
-        offset += struct.calcsize(fmt)
-        return (RawEmbedding(n, m, d, t, q), offset)
+        return (RawEmbedding(n, m, d, t, quality=None), offset)
 
     def write_projection(self, projected: Reduced) -> bytes:
-        # First, transpose the values to be ndim x nsamples x nverts.
-        # Then, reshape so that we have ndim vectors each corresponding to e.g.
-        # the X values of the first vertex over time, followed by the X values
-        # of the second vertex, etc.
-        #
-        # Finally we compress each column and see if that gained us space. If not, we
-        # write it uncompressed.
-        #
-        # Overall the bytes we output are:
-        # * first a bitmask for whether each stream is compressed
-        # * each stream, one by one, compressed if helpful
-        # We do not store the sizes because the header already has that.
-        nsamples, nverts, ndim = projected.shape
-
-        reordered = projected.transpose(2, 0, 1)
-        count = nsamples * nverts
-        by_dimension = reordered.reshape(ndim, count)
-
-        def write_coordinate(d: int) -> bytes:
-            column = by_dimension[d, :]
-            stream = ApproximatedStream(column, self.quality)
-            return stream.tobytes_dataonly(count=count)
-
-        coords = [write_coordinate(d) for d in range(ndim)]
-        return b"".join(coords)
+        if self.quality is None:
+            # Lossy compression, so we must not re-export if we read
+            # this data from file.
+            raise ValueError("unable to re-encode data lossily")
+        return encode_coordinates(projected, self.quality)
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
-        n = self.nsamples * self.nverts
-
-        def read_coordinate(d, b, offset) -> tuple[np.ndarray, int]:
-            """
-            Read the values of the coordinate in dimension d. d=0 would be all
-            the X values, etc.
-
-            Return an array of shape nsamples x nverts, as well as the offset for
-            further reading from the stream.
-            """
-            stream, offset = ApproximatedStream.from_bytes_dataonly(
-                dtype=self.dtype,
-                count=n,
-                b=b,
-                offset=offset,
-            )
-            data = np.frombuffer(stream.stream, dtype=self.dtype, count=n)
-
-            # Data is 1d, with all the data for v1, then all the data for v2, etc.
-            # In other words, each column is a time sample, each row is a vertex.
-            # (reading in C order)
-            values = data.reshape((self.nsamples, self.nverts))
-            return values, offset
-
-        # coords has shape ndim, nsamples, nverts
-        coords = []
-        for d in range(self.ndim):
-            coord, offset = read_coordinate(d, b, offset)
-            coords.append(coord)
-        # convert to shape nsamples, nverts, ndim
-        data = np.array(coords).transpose(1, 2, 0)
-        return (data, offset)
+        return decode_coordinates(
+            b, offset, self.nsamples, self.nverts, self.ndim, self.dtype
+        )
 
 
 class StaticEmbedding(Embedding):

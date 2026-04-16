@@ -209,3 +209,55 @@ class ApproximatedStream:
         return ApproximatedStream.from_bytes_dataonly(
             dtype=dt, count=None, b=b, offset=offset, verbose=verbose
         )
+
+
+def encode_coordinates(data: np.ndarray, quality: float) -> bytes:
+    """
+    Given an array of shape (nsamples, nverts, ndim) or (nverts, ndim):
+
+    Output ndim streams each of which is the samples of each vertex,
+    concatenated (if there's no samples, then just the single coordinate of
+    each vertex).
+    """
+    if len(data.shape) == 2:
+        data = data[np.newaxis, :]
+    nsamples, nverts, ndim = data.shape
+
+    reordered = data.transpose(2, 0, 1)
+    count = nsamples * nverts
+    by_dimension = reordered.reshape(ndim, count)
+
+    def write_coordinate(d: int) -> ApproximatedStream:
+        column = by_dimension[d, :]
+        return ApproximatedStream(column, quality)
+
+    streams = [write_coordinate(d) for d in range(ndim)]
+
+    return b"".join([coord.tobytes_dataonly(count=count) for coord in streams])
+
+
+def decode_coordinates(
+    b: bytes, offset: int, nsamples: int, nverts: int, ndim: int, dtype: type
+) -> tuple[np.ndarray, int]:
+    """
+    Return an array of shape (nsamples, nverts, ndim) from the given byte
+    stream, plus the offset to the next byte to read.
+
+    The bytes must have been output from encode_coordinates.
+    """
+    count = nsamples * nverts
+
+    streams = []
+    for d in range(ndim):
+        stream, offset = ApproximatedStream.from_bytes_dataonly(
+            dtype=dtype,
+            count=count,
+            b=b,
+            offset=offset,
+        )
+        streams.append(stream)
+
+    by_dimension = np.array([stream.stream for stream in streams])
+    reordered = by_dimension.reshape((ndim, nsamples, nverts))
+    data = reordered.transpose(1, 2, 0)
+    return data, offset
