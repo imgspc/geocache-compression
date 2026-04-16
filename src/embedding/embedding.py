@@ -236,33 +236,19 @@ class RawEmbedding(Embedding):
         nsamples, nverts, ndim = projected.shape
 
         reordered = projected.transpose(2, 0, 1)
-        by_dimension = reordered.reshape(ndim, nsamples * nverts)
+        count = nsamples * nverts
+        by_dimension = reordered.reshape(ndim, count)
 
-        def write_column(d: int) -> tuple[bytes, bool]:
+        def write_coordinate(d: int) -> bytes:
             column = by_dimension[d, :]
             stream = ApproximatedStream(column, self.quality)
-            compressed = stream.tobytes_dataonly()
-            raw = column.tobytes()
-            if len(raw) <= len(compressed):
-                return (raw, False)
-            else:
-                return (compressed, True)
+            return stream.tobytes_dataonly(count=count)
 
-        columns = [write_column(d) for d in range(ndim)]
-        streams, choices = zip(*columns)
-        packed_choice = np.packbits(choices)
-        return b"".join([packed_choice.tobytes(), *streams])
+        coords = [write_coordinate(d) for d in range(ndim)]
+        return b"".join(coords)
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
-        # ceil(nverts * ndim / 8) is the number of bytes that we need for one bit
-        # per column. We also need to know how many bits we actually want to keep,
-        # since there may be up to 7 extras.
-        nchoicebytes = (self.ndim - 1) // 8 + 1
-        packed_choice = np.frombuffer(
-            b, offset=offset, dtype=np.uint8, count=nchoicebytes
-        )
-        offset += nchoicebytes
-        choice = np.unpackbits(packed_choice, count=self.ndim)
+        n = self.nsamples * self.nverts
 
         def read_coordinate(d, b, offset) -> tuple[np.ndarray, int]:
             """
@@ -272,15 +258,14 @@ class RawEmbedding(Embedding):
             Return an array of shape nsamples x nverts, as well as the offset for
             further reading from the stream.
             """
-            n = self.nsamples * self.nverts
-            if choice[d]:
-                stream, offset = ApproximatedStream.from_bytes_dataonly(
-                    self.dtype, b, offset
-                )
-                data = np.frombuffer(stream.stream, dtype=self.dtype, count=n)
-            else:
-                data = np.frombuffer(b, offset=offset, dtype=self.dtype, count=n)
-                offset += n * data.itemsize
+            stream, offset = ApproximatedStream.from_bytes_dataonly(
+                dtype=self.dtype,
+                count=n,
+                b=b,
+                offset=offset,
+            )
+            data = np.frombuffer(stream.stream, dtype=self.dtype, count=n)
+
             # Data is 1d, with all the data for v1, then all the data for v2, etc.
             # In other words, each column is a time sample, each row is a vertex.
             # (reading in C order)

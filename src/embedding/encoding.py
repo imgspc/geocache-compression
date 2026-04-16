@@ -46,30 +46,20 @@ class ApproximatedStream:
     def _quality_to_hex(self) -> str:
         if self.epsilon is None:
             raise ValueError("unable to compress a stream without an error bound")
-        # not checked: that we're in 32 bits
-        fbits: bytes = struct.pack("f", self.epsilon)
+        if self.stream.dtype != np.float32:
+            raise NotImplementedError("compression only available for float32")
+        fbits = struct.pack("f", self.epsilon)
         (unsigned,) = struct.unpack("I", fbits)
         return "0x" + hex(unsigned)
 
-    def tobytes_dataonly(self, verbose=False) -> bytes:
+    def _tobytes_compressed(self, verbose: bool) -> Optional[bytes]:
         """
-        Return the bytes just of the data stream.
-
-        Presumably the caller knows what the data type and precision are.
-
-        The first word is the length in bytes of the compressed data stream.
+        Compress the stream and return its bytes.
         """
-        if self.epsilon is None:
-            raise ValueError("unable to compress a stream without an error bound")
-
         if self.stream.dtype != np.float32:
-            # TODO: handle float16 and float64.
-            b = self.stream.tobytes()
-            length = struct.pack("<I", len(b))
-            return length + b
-
-        # TODO: get neats to accept a stream in from stdin and output to stdout rather than
-        # requiring temp files.
+            return None
+        if len(self.stream) == 0:
+            return None
         with temp_filename() as binfile:
             with temp_filename() as neatsfile:
                 self.stream.tofile(binfile)
@@ -89,23 +79,101 @@ class ApproximatedStream:
                 subprocess.run(args)
 
                 with open(neatsfile.name, "rb") as f:
-                    b = f.read()
-                length = struct.pack("<I", len(b))
-                return length + b
+                    return f.read()
+
+    def _tobytes_raw(self, verbose: bool) -> bytes:
+        return self.stream.tobytes()
+
+    def tobytes_dataonly(self, count: Optional[int], verbose=False) -> bytes:
+        """
+        Return the bytes just of the data stream.
+
+        count is len(self.stream) but should be provided only if the
+        decoder will be able to know it without decoding this stream (i.e. if
+        the data is known from other data). Otherwise, provide None.
+        """
+        if self.epsilon is None:
+            raise ValueError("unable to re-compress a stream")
+
+        compressed = self._tobytes_compressed(verbose)
+        raw = self._tobytes_raw(verbose)
+
+        compressed_header = 4
+        raw_header = 4 if count is None else 1
+
+        # Encoding:
+        # if we're storing compressed, length in bytes as positive big-endian signed int
+        # if we're storing raw:
+        #       if count is known, header is 0xff
+        #       if count is not known, header is 4-byte signed int, corresponds to -length in bytes
+        if compressed is None:
+            use_raw = True
+        elif len(raw) + raw_header <= len(compressed) + compressed_header:
+            use_raw = True
+        else:
+            use_raw = False
+
+        if use_raw:
+            data = raw
+            if count is not None:
+                header = b"\xff"
+                # length is unrestricted
+            else:
+                header = struct.pack(">i", -len(raw))
+
+                # check the length is in bounds (we can negate it)
+                if len(raw) >= 0xA0000000:
+                    raise NotImplementedError(
+                        "length {len(data)} too long; TODO: support 64-bit length"
+                    )
+        else:
+            assert compressed is not None
+            data = compressed
+            header = struct.pack(">i", len(compressed))
+
+            # check the length is in bounds (positive as int32)
+            if len(compressed) >= 0xA0000000:
+                raise NotImplementedError(
+                    "length {len(data)} too long; TODO: support 64-bit length"
+                )
+
+        return header + data
 
     @staticmethod
     def from_bytes_dataonly(
-        dtype: type, b: bytes, offset: int, verbose=False
+        dtype: type, count: Optional[int], b: bytes, offset: int, verbose=False
     ) -> tuple[ApproximatedStream, int]:
         """
-        Read the data from the bytes, using a known header.
+        Read the data from the bytes.
+
+        count is the number of values we expect to be decoding, if known
+        from exogenous data.  The corresponding to_bytes_dataonly call must
+        have the same count value (i.e. the same number, or both are None).
         """
-        (length,) = struct.unpack_from("<I", b, offset)
-        offset += 4
+        if count is None:
+            (length,) = struct.unpack_from(">i", b, offset)
+            offset += 4
+
+            if length <= 0:
+                # negative or zero means raw (because -0 is still zero).
+                length = -length
+                is_raw = True
+            else:
+                is_raw = False
+        else:
+            if b[offset] == 0xFF:
+                is_raw = True
+                length = count * np.dtype(dtype).itemsize
+                offset += 1
+            else:
+                is_raw = False
+                (length,) = struct.unpack_from(">I", b, offset)
+                offset += 4
+
         payload = b[offset : offset + length]
         offset += length
 
-        if dtype != np.float32:
+        if is_raw:
             uncompressed: np.ndarray = np.frombuffer(payload, dtype=dtype)
         else:
             with temp_filename() as neatsfile:
@@ -128,7 +196,7 @@ class ApproximatedStream:
         return b"".join(
             [
                 pack_dtype(self.stream.dtype),
-                self.tobytes_dataonly(verbose),
+                self.tobytes_dataonly(count=None, verbose=verbose),
             ]
         )
 
@@ -139,5 +207,5 @@ class ApproximatedStream:
         dt, offset = unpack_dtype(b, offset)
         assert issubclass(dt, np.number)
         return ApproximatedStream.from_bytes_dataonly(
-            dt, b, offset=offset, verbose=verbose
+            dtype=dt, count=None, b=b, offset=offset, verbose=verbose
         )
