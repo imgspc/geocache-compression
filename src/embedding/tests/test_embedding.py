@@ -47,7 +47,7 @@ class EmbeddingTestCase(unittest.TestCase):
         embed2, offset = cls.from_bytes(b)
         self.assertEqual(offset, len(b))
 
-        b = embed2.write_projection(projected)
+        b = embed.write_projection(projected)
         projected2, offset = embed2.read_projection(b)
         self.assertEqual(offset, len(b))
         self.assertTrue(np.allclose(projected2, projected, rtol=0, atol=quality))
