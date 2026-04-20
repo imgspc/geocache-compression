@@ -239,16 +239,18 @@ class StaticEmbedding(Embedding):
     This embedding minimizes L_inf error, not L_2 error.
     """
 
-    def __init__(self, c: np.ndarray, nsamples: int):
+    def __init__(self, c: np.ndarray, nsamples: int, quality: Optional[float]):
         """
         Most users will want to use `from_data` or `from_bytes` rather than directly
         using the constructor.
 
         c is the centre, shape (1, nverts, ndim)
         nsamples is the number of rows in the original data
+        quality is the rounding allowed; not stored in serialization
         """
         self.c = c
         self.nsamples = nsamples
+        self.quality = quality
 
     @classmethod
     def _bbox(cls, data: Domain) -> tuple[np.ndarray, np.ndarray]:
@@ -271,7 +273,7 @@ class StaticEmbedding(Embedding):
         minimum, maximum = cls._bbox(data)
         c = 0.5 * (minimum + maximum)
         nsamples, _, __ = data.shape
-        return cls(c, nsamples)
+        return cls(c, nsamples, quality)
 
     @classmethod
     def is_valid(cls, data: Domain, quality: float) -> bool:
@@ -300,14 +302,19 @@ class StaticEmbedding(Embedding):
         """
         Write the matrix size, type, and centre.
         """
+        if self.quality is None:
+            raise ValueError("refusing to re-encode data previous lossily compressed")
         nverts, ndim = self.c.shape
+
+        # Write the xyz values as (potentially) compressed streams.
+        # todo: reorder the vertices in a space-filling order
         return b"".join(
             (
                 pack_small_uint(self.nsamples),
                 pack_small_uint(nverts),
                 pack_small_uint(ndim),
                 pack_dtype(self.c.dtype),
-                self.c.tobytes(),
+                encode_coordinates(self.c, self.quality),
             )
         )
 
@@ -321,11 +328,11 @@ class StaticEmbedding(Embedding):
         d, offset = unpack_small_uint(b, offset)
         t, offset = unpack_dtype(b, offset)
         assert issubclass(t, np.number)
-        c = np.frombuffer(b, offset=offset, dtype=t, count=m * d)
-        c = np.reshape(c, (m, d))
-        tsize = c.itemsize
-        offset += tsize * m * d
-        return (StaticEmbedding(c, n), offset)
+        # We only actually saved one frame of centre data.
+        # Decode outputs an array of shape (1,m,d), flatten it to (m,d)
+        c, offset = decode_coordinates(b, offset, 1, m, d, t)
+        c = c.reshape(m, d)
+        return (StaticEmbedding(c, n, quality=None), offset)
 
     def write_projection(self, projected: Reduced) -> bytes:
         """

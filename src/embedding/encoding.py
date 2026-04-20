@@ -136,7 +136,11 @@ class ApproximatedStream:
                 raise NotImplementedError(
                     "length {len(data)} too long; TODO: support 64-bit length"
                 )
-
+        if verbose:
+            storage = "raw" if use_raw else "compressed"
+            print(
+                f"wrote {storage} {len(data)} bytes + header {len(header)} = {len(data) + len(header)}"
+            )
         return header + data
 
     @staticmethod
@@ -152,7 +156,7 @@ class ApproximatedStream:
         """
         if count is None:
             (length,) = struct.unpack_from(">i", b, offset)
-            offset += 4
+            headerlen = 4
 
             if length <= 0:
                 # negative or zero means raw (because -0 is still zero).
@@ -164,12 +168,18 @@ class ApproximatedStream:
             if b[offset] == 0xFF:
                 is_raw = True
                 length = count * np.dtype(dtype).itemsize
-                offset += 1
+                headerlen = 1
             else:
                 is_raw = False
                 (length,) = struct.unpack_from(">I", b, offset)
-                offset += 4
+                headerlen = 4
 
+        if verbose:
+            storage = "raw" if is_raw else "compressed"
+            print(
+                f"reading {storage} {length} bytes + header {headerlen} = {length + headerlen}"
+            )
+        offset += headerlen
         payload = b[offset : offset + length]
         offset += length
 
@@ -211,20 +221,20 @@ class ApproximatedStream:
         )
 
 
-def encode_coordinates(data: np.ndarray, quality: float) -> bytes:
+def encode_coordinates(data: np.ndarray, quality: float, verbose=False) -> bytes:
     """
-    Given an array of shape (nsamples, nverts, ndim) or (nverts, ndim):
+    Given an array of shape (nsamples, nverts, ndim) or (nverts, ndim), the latter of
+    which is reinterpreted as (1, nverts, ndim).
 
     Output ndim streams each of which is the samples of each vertex,
-    concatenated (if there's no samples, then just the single coordinate of
-    each vertex).
+    concatenated.
     """
     if len(data.shape) == 2:
         data = data[np.newaxis, :]
     nsamples, nverts, ndim = data.shape
+    count = nsamples * nverts
 
     reordered = data.transpose(2, 0, 1)
-    count = nsamples * nverts
     by_dimension = reordered.reshape(ndim, count)
 
     def write_coordinate(d: int) -> ApproximatedStream:
@@ -232,12 +242,23 @@ def encode_coordinates(data: np.ndarray, quality: float) -> bytes:
         return ApproximatedStream(column, quality)
 
     streams = [write_coordinate(d) for d in range(ndim)]
-
-    return b"".join([coord.tobytes_dataonly(count=count) for coord in streams])
+    bytestreams = [
+        coord.tobytes_dataonly(count=count, verbose=verbose) for coord in streams
+    ]
+    b = b"".join(bytestreams)
+    if verbose:
+        print(f"output of {ndim} streams is {len(b)} bytes")
+    return b
 
 
 def decode_coordinates(
-    b: bytes, offset: int, nsamples: int, nverts: int, ndim: int, dtype: type
+    b: bytes,
+    offset: int,
+    nsamples: int,
+    nverts: int,
+    ndim: int,
+    dtype: type,
+    verbose=False,
 ) -> tuple[np.ndarray, int]:
     """
     Return an array of shape (nsamples, nverts, ndim) from the given byte
@@ -249,11 +270,12 @@ def decode_coordinates(
 
     streams = []
     for d in range(ndim):
+        if verbose:
+            print(
+                f"read coord {d} starting at {offset} / {len(b)} ({len(b) - offset} remaining)"
+            )
         stream, offset = ApproximatedStream.from_bytes_dataonly(
-            dtype=dtype,
-            count=count,
-            b=b,
-            offset=offset,
+            dtype=dtype, count=count, b=b, offset=offset, verbose=verbose
         )
         streams.append(stream)
 
