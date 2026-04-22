@@ -5,6 +5,7 @@ import numpy as np
 import struct
 import subprocess
 import tempfile
+import concurrent.futures
 
 from typing import Optional
 from pathlib import Path
@@ -237,14 +238,13 @@ def encode_coordinates(data: np.ndarray, quality: float, verbose=False) -> bytes
     reordered = data.transpose(2, 0, 1)
     by_dimension = reordered.reshape(ndim, count)
 
-    def write_coordinate(d: int) -> ApproximatedStream:
+    def write_coordinate(d: int) -> bytes:
         column = by_dimension[d, :]
-        return ApproximatedStream(column, quality)
+        stream = ApproximatedStream(column, quality)
+        return stream.tobytes_dataonly(count=count, verbose=verbose)
 
-    streams = [write_coordinate(d) for d in range(ndim)]
-    bytestreams = [
-        coord.tobytes_dataonly(count=count, verbose=verbose) for coord in streams
-    ]
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=ndim)
+    bytestreams = executor.map(write_coordinate, range(ndim))
     b = b"".join(bytestreams)
     if verbose:
         print(f"output of {ndim} streams is {len(b)} bytes")
