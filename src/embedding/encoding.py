@@ -7,7 +7,8 @@ import subprocess
 import tempfile
 import concurrent.futures
 
-from typing import Optional
+from typing import Optional, Union
+from numpy.typing import DTypeLike
 from pathlib import Path
 from .util import pack_small_uint, unpack_small_uint, pack_dtype, unpack_dtype
 
@@ -146,7 +147,11 @@ class ApproximatedStream:
 
     @staticmethod
     def from_bytes_dataonly(
-        dtype: type, count: Optional[int], b: bytes, offset: int, verbose=False
+        dtype: Union[DTypeLike, type],
+        count: Optional[int],
+        b: bytes,
+        offset: int,
+        verbose=False,
     ) -> tuple[ApproximatedStream, int]:
         """
         Read the data from the bytes.
@@ -254,10 +259,10 @@ def encode_coordinates(data: np.ndarray, quality: float, verbose=False) -> bytes
 def decode_coordinates(
     b: bytes,
     offset: int,
-    nsamples: int,
+    nsamples: Optional[int],
     nverts: int,
     ndim: int,
-    dtype: type,
+    dtype: Union[DTypeLike, type],
     verbose=False,
 ) -> tuple[np.ndarray, int]:
     """
@@ -266,6 +271,11 @@ def decode_coordinates(
 
     The bytes must have been output from encode_coordinates.
     """
+    if nsamples is None:
+        nsamples = 1
+        flatten_samples = True
+    else:
+        flatten_samples = False
     count = nsamples * nverts
 
     streams = []
@@ -282,4 +292,6 @@ def decode_coordinates(
     by_dimension = np.array([stream.stream for stream in streams])
     reordered = by_dimension.reshape((ndim, nsamples, nverts))
     data = reordered.transpose(1, 2, 0)
+    if flatten_samples:
+        data = data.reshape((nverts, ndim))
     return data, offset

@@ -328,10 +328,9 @@ class StaticEmbedding(Embedding):
         d, offset = unpack_small_uint(b, offset)
         t, offset = unpack_dtype(b, offset)
         assert issubclass(t, np.number)
-        # We only actually saved one frame of centre data.
-        # Decode outputs an array of shape (1,m,d), flatten it to (m,d)
-        c, offset = decode_coordinates(b, offset, 1, m, d, t)
-        c = c.reshape(m, d)
+        c, offset = decode_coordinates(
+            b, offset, nsamples=None, nverts=m, ndim=d, dtype=t
+        )
         return (StaticEmbedding(c, n, quality=None), offset)
 
     def write_projection(self, projected: Reduced) -> bytes:
@@ -552,7 +551,7 @@ class AbstractPCAEmbedding(Embedding):
         """
         ...
 
-    def __init__(self, pca: FlatCenteredPCA, c: np.ndarray):
+    def __init__(self, pca: FlatCenteredPCA, c: np.ndarray, cbytes: bytes):
         """
         Most users will want to use `from_data` or `from_bytes` rather than directly
         using the constructor.
@@ -563,6 +562,7 @@ class AbstractPCAEmbedding(Embedding):
             raise ValueError(
                 f"centroid shape should be (nverts, ndim) rather than {c.shape}"
             )
+        self.cbytes = cbytes
 
     @classmethod
     def from_data(
@@ -583,19 +583,29 @@ class AbstractPCAEmbedding(Embedding):
         if not nsamples or not nverts or not ndim:
             raise ValueError(f"Empty matrix with shape {data.shape}")
 
-        if quality < 0:
+        if quality <= 0:
             raise ValueError(f"invalid quality {quality}")
 
-        # Center the data.
+        # Center the data. We compute the centroid in full precision, then
+        # we round-trip it through encoding and use that for calculations to
+        # avoid letting roundoff accumulate.
         c = np.sum(data, axis=0) / nsamples
-        if quality != 0:
-            c = np.round(c / quality) * quality
+        cbytes = encode_coordinates(c, quality)
+        c, _ = decode_coordinates(
+            cbytes,
+            offset=0,
+            nsamples=None,
+            nverts=nverts,
+            ndim=ndim,
+            dtype=data.dtype,
+            verbose=verbose,
+        )
         M = data - c
 
         # Flatten M and get its PCA
         M = cls.flatten(M)
         pca = FlatCenteredPCA.from_data(M, quality, verbose)
-        return cls(pca, c)
+        return cls(pca, c, cbytes)
 
     @classmethod
     def is_valid(cls, data: Domain, quality: float) -> bool:
@@ -627,8 +637,8 @@ class AbstractPCAEmbedding(Embedding):
         return b"".join(
             (
                 self.pca.tobytes(),
-                self.c.tobytes(),
                 pack_small_uint(self.ndim),
+                self.cbytes,
             )
         )
 
@@ -643,15 +653,17 @@ class AbstractPCAEmbedding(Embedding):
         t = pca.WVt.dtype
         tsize = t.itemsize
 
-        c = np.frombuffer(b, offset=offset, dtype=t, count=m)
-        offset += tsize * m
-
         ndim, offset = unpack_small_uint(b, offset)
         if m % ndim != 0:
             raise ValueError(f"{m} does not divide evenly into {ndim} dimensions")
-        c = np.reshape(c, (m // ndim, ndim))
+        nverts = m // ndim
+        cstart = offset
+        c, cend = decode_coordinates(
+            b, offset, nsamples=None, nverts=nverts, ndim=ndim, dtype=t, verbose=False
+        )
+        offset = cend
 
-        return (cls(pca, c), offset)
+        return (cls(pca, c, b[cstart:cend]), offset)
 
     def write_projection(self, projected: Reduced) -> bytes:
         return projected.tobytes()
@@ -668,12 +680,12 @@ class PCAConfigurationSpaceEmbedding(AbstractPCAEmbedding):
     each column is a coordinate of a vertex.
     """
 
-    def __init__(self, pca: FlatCenteredPCA, c: np.ndarray):
+    def __init__(self, pca: FlatCenteredPCA, c: np.ndarray, cbytes: bytes):
         """
         Most users will want to use `from_data` or `from_bytes` rather than directly
         using the constructor.
         """
-        super().__init__(pca, c)
+        super().__init__(pca, c, cbytes)
 
     @classmethod
     def flatten(cls, data: np.ndarray) -> np.ndarray:
