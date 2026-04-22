@@ -423,7 +423,6 @@ class FlatCenteredPCA:
         n, m = M.shape
         if not n or not m:
             raise ValueError(f"Empty matrix with shape {M.shape}")
-        min_d = min(n, m)
         t = M.dtype
 
         if quality < 0:
@@ -431,8 +430,13 @@ class FlatCenteredPCA:
 
         # Perform SVD:
         # Vt is the pseudo-rotation to the SVD basis (transpose of V, historical reasons)
+        #       In configuration space, this is a set of configurations that get blended.
+        #       In R^d, this is a rotoreflection to a new orthonormal basis.
         # W is the scaling matrix -- we only store the diagonal s.
         # U is the data rewritten in the SVD basis (it is, itself, semi-orthogonal).
+        # WU can be interpreted as:
+        #       In configuration space, the blend weights.
+        #       In R^d, the coordinates in the new basis.
         # The svd algorithm guarantees s is returned in order largest scale first.
         #
         # We can't assume M is hermitian, so we need the full computation.
@@ -440,86 +444,62 @@ class FlatCenteredPCA:
         # We don't want the full matrices, they'd be huge.
         U, s, Vt = np.linalg.svd(M, full_matrices=False)
 
-        if quality == 0:
-            count = min_d
-            WVt = np.diag(s) @ Vt
-        else:
-            # Round off to U', W', Vt' so that M' = U'W'Vt' and ||M-M'||_inf < quality.
-            # U and V are rotations so the rows are unit vectors.
-            # W is a diagonal matrix with non-negative values, in order biggest first.
-            # M = U W Vt
-            # M_ij = sum_k U_ik W_kk Vt_kj
-            # M_ij = sum_k U_ik s_k Vt_kj
-            #
-            # We will choose a vector eps of roundoff values as follows:
-            # * every entry in the jth column of U rounds to the nearest multiple of eps_j
-            # * every entry in the ith row of WVt rounds to the nearest multiple of eps_i
-            #
-            # This ensures that every term that involves a value of W has the same error bounds:
-            #
-            # TODO: verify interval arithmetic here:
-            # M'_ij = sum_k [(U_ik +- eps_k) (s_k Vt_kj +- eps_k)]
-            #       = sum_k [U_ik s_k Vt_kj +- eps_k (s_k Vt_kj + U_ik) +- eps_k^2]
-            #
-            # The overall error in a component of the reconstruction, M', is thus:
-            # |M_ij - M'_ij| = |sum_k [U_ik s_k Vt_kj - U_ik s_k Vt_kj +- eps_k (s_k Vt_kj + U_ik) +- eps_k^2]|
-            #                = |sum_k [                                +- eps_k (s_k Vt_kj + U_ik) +- eps_k^2]|
-            # Given that U_i and Vt_k are unit vectors this is bounded by:
-            #             <= sum_k |eps_k (s_k + 1)| + eps_k^2
-            # To ensure the error is at most quality, then, it suffices to choose eps to satisfy:
-            #       quality >= sum_k eps_k (s_k + 1) + eps_k^2
-            # Allowing each component of eps to have equal weight (and requiring they are positive):
-            #       quality / min(data.shape) == eps_k (s_k + 1) + eps_k^2
-            # solve for eps_k:
-            #       eps_k = [-(s_k+1) + sqrt((s_k+1)^2 + 4 quality/min(data.shape))] / 2
-            # Note that eps_k is strictly positive, so we can divide by it safely.
-            #
-            # Once the eps vector is chosen, note that rounding s can zero out some entries entirely,
-            # achieving dimensionality reduction.
-            #
-            # TODO: make eps be precisely a power of two so that rounding zeroes out low-order bits.
-
-            # Given the s1^2, we need to do the math here in higher precision.
-            higher: DTypeLike
-            match t:
-                case np.float16:
-                    higher = np.float32
-                case np.float32:
-                    higher = np.float64
-                case _:
-                    higher = np.longdouble
-            s1 = np.array(s, dtype=higher) + higher(1)  # type: ignore
-            s1s1 = s1 * s1 + (4 * quality / min_d)
-            s1s1_sqrt = np.sqrt(s1s1)
-            eps = 0.5 * (s1s1_sqrt - s1)
-
-            # Round s to see if we can achieve dimensionality reduction.
-            # s' = eps * round(s / eps) ; but no need to keep s'
-            count = np.count_nonzero(np.round(s / eps))
-
-            if count == min_d:
-                WVt = np.diag(s) @ Vt
+        # We want to drop as many dimensions as possible since each one dropped removes
+        # n+m+1 values: n from U, m from Vt, and 1 from s.
+        # Count how much error we sustain if we drop 'count' values.
+        def error(count: int) -> float:
+            if count == 0:
+                Uprime = U
+                sprime = s
+                Vtprime = Vt
             else:
-                # Drop the zero-rounded values by dropping:
-                # row/col from W, rows from Vt, columns from U, and values from eps
-                WVt = np.diag(s[0:count]) @ Vt[0:count, :]
-                U = np.array(U[:, 0:count], copy=True)
-                eps = np.array(eps[0:count], copy=True)
+                Uprime = U[:, 0:-count]
+                sprime = s[0:-count]
+                Vtprime = Vt[0:-count, :]
+            # * to multiply by a diagonal matrix as a vector; @ for matmul
+            Mprime = Uprime * sprime @ Vtprime
+            return np.max(np.fabs(M - Mprime))
 
+        # Error increases monotonically with the more dimensions we drop, so
+        # binary search indices 0..len(s) to find the most we can drop while
+        # keeping error < quality.
+        # Binary search, adapted from bisect.bisect_right; lo ends up at the
+        # smallest number of dimensions to drop that produces too much error.
+        lo = 0
+        hi = len(s)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if quality < error(mid):
+                hi = mid
+            else:
+                lo = mid + 1
+        count = lo - 1
+        if count < 0:
             if verbose:
                 print(
-                    f"{M.shape}, projected to {WVt.shape}: {M.size} reduced to {WVt.size} + {U.size} ({(WVt.size + U.size)/M.size:.2%})"
+                    f"PCA creates too much roundoff error even without dimensionality reduction"
                 )
+            count = 0
+            # TODO: return None
 
-            # Now, round the matrices.
-            # U we divide each row component-wise by eps, round, then multiply back out by eps
-            # WVt we do that to the transpose to operate on each column component-wise
-            #
-            # Make sure to save as the original data size.
-            U = np.array(np.round(U / eps) * eps, dtype=t)
-            WVt = np.array((np.round(WVt.T / eps) * eps).T, dtype=t)
+        # Commit to the max level of roundoff that we found that stays within bounds.
+        # Make copies to release the truncated bits.
+        roundoff = error(count)
+        if count > 0:
+            U = np.array(U[:, 0:-count], copy=True)
+            s = np.array(s[0:-count], copy=True)
+            Vt = np.array(Vt[0:-count, :], copy=True)
 
-        embedding = cls(n, m, count, WVt)
+        if verbose:
+            if count > 0:
+                print(
+                    f"PCA reduced {count} dimensions from {M.shape} to {U.shape} and {Vt.shape} with error {roundoff}"
+                )
+            else:
+                print(f"PCA unable to reduce dimensions")
+
+        WVt = np.diag(s) @ Vt
+        embedding = cls(n, m, len(s), WVt)
         embedding.U = U
         return embedding
 
