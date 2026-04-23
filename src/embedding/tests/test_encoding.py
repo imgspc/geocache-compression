@@ -35,3 +35,34 @@ class EncodingTestCase(unittest.TestCase):
         print(f"maxdiff: {np.max(np.fabs(decodeddata - data))}")
         print(f"non-zero indices: {np.nonzero(decodeddata - data)}")
         self.assertTrue(np.all(data == decodeddata))
+
+    def test_encode_coordinates(self) -> None:
+        data = np.arange(7 * 8 * 2, dtype=np.float32)
+        shape1 = (7 * 8 * 2,)
+        encoded = encoding.encode_coordinates(data, quality=0.1)
+        decoded, offset = encoding.decode_coordinates(
+            encoded, offset=0, shape=shape1, dtype=np.float32
+        )
+        self.assertEqual(offset, len(encoded))
+        self.assertEqual(decoded.shape, shape1)
+        self.assertTrue(np.allclose(data, decoded, rtol=0, atol=0.1))
+
+        shape2 = (7 * 8, 2)
+        data = data.reshape(shape2)
+        encoded = encoding.encode_coordinates(data, quality=0.1)
+        decoded, offset = encoding.decode_coordinates(
+            encoded, offset=0, shape=shape2, dtype=np.float32
+        )
+        self.assertEqual(offset, len(encoded))
+        self.assertEqual(decoded.shape, shape2)
+        self.assertTrue(np.allclose(data, decoded, rtol=0, atol=0.1))
+
+        shape3 = (7, 8, 2)
+        data = data.reshape(shape3)
+        encoded = encoding.encode_coordinates(data, quality=0.1)
+        decoded, offset = encoding.decode_coordinates(
+            encoded, offset=0, shape=shape3, dtype=np.float32
+        )
+        self.assertEqual(offset, len(encoded))
+        self.assertEqual(decoded.shape, shape3)
+        self.assertTrue(np.allclose(data, decoded, rtol=0, atol=0.1))

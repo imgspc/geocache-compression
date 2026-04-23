@@ -41,8 +41,7 @@ class Embedding(ABC):
 
         The output will have shape (n, m'). Expect m' << m.
 
-        In general the data must be the same as what was used to initialize
-        the embedding. Some specific embeddings may relax that requirement
+        Only valid to call this when you used from_data as the constructor.
         """
         ...
 
@@ -50,6 +49,8 @@ class Embedding(ABC):
     def invert(self, data: Reduced) -> Domain:
         """
         Return transformed data from the embedded space to the original space.
+
+        Must be valid to call this if you used from_bytes as the constructor.
         """
         ...
 
@@ -225,9 +226,8 @@ class RawEmbedding(Embedding):
         return encode_coordinates(projected, self.quality)
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
-        return decode_coordinates(
-            b, offset, self.nsamples, self.nverts, self.ndim, self.dtype
-        )
+        shape = (self.nsamples, self.nverts, self.ndim)
+        return decode_coordinates(b, offset, shape=shape, dtype=self.dtype)
 
 
 class StaticEmbedding(Embedding):
@@ -328,9 +328,8 @@ class StaticEmbedding(Embedding):
         d, offset = unpack_small_uint(b, offset)
         t, offset = unpack_dtype(b, offset)
         assert issubclass(t, np.number)
-        c, offset = decode_coordinates(
-            b, offset, nsamples=None, nverts=m, ndim=d, dtype=t
-        )
+        shape = (m, d)
+        c, offset = decode_coordinates(b, offset, shape=shape, dtype=t)
         return (StaticEmbedding(c, n, quality=None), offset)
 
     def write_projection(self, projected: Reduced) -> bytes:
@@ -405,6 +404,25 @@ class FlatCenteredPCA:
                 self.WVt.tobytes(),
             )
         )
+
+    @classmethod
+    def _epsilon(cls, U: np.ndarray, WVt: np.ndarray, q: float) -> np.ndarray:
+        """
+        Given the SVD as U W Vt where we already multiplied WVt, return error
+        bounds for each column of U and every row of WVt that, after encoding,
+        ensure error will be bounded by q.
+        """
+        # Compute:
+        # eps_k^2 + eps_k(maxU_k + maxV_k) - q/d == 0
+        # eps = [sqrt((maxU + maxV)^2 + 4q/d) - (maxU + maxV)] / 2
+        # maxU + maxV gets squared so do the calculation in 64-bit, and return to
+        # lower precision later.
+        maxU = np.max(U, axis=0).astype(np.float64)
+        maxV = np.max(WVt, axis=1).astype(np.float64)
+        assert len(maxU) == len(maxV)
+        d = len(maxU)
+        maxUV = maxU + maxV
+        return (0.5 * (np.sqrt(4 * q / d + maxUV.square()) - maxUV)).astype(U.dtype)
 
     @classmethod
     def from_data(
@@ -591,12 +609,11 @@ class AbstractPCAEmbedding(Embedding):
         # avoid letting roundoff accumulate.
         c = np.sum(data, axis=0) / nsamples
         cbytes = encode_coordinates(c, quality)
+        shape = (nverts, ndim)
         c, _ = decode_coordinates(
             cbytes,
             offset=0,
-            nsamples=None,
-            nverts=nverts,
-            ndim=ndim,
+            shape=shape,
             dtype=data.dtype,
             verbose=verbose,
         )
@@ -658,9 +675,8 @@ class AbstractPCAEmbedding(Embedding):
             raise ValueError(f"{m} does not divide evenly into {ndim} dimensions")
         nverts = m // ndim
         cstart = offset
-        c, cend = decode_coordinates(
-            b, offset, nsamples=None, nverts=nverts, ndim=ndim, dtype=t, verbose=False
-        )
+        shape = (nverts, ndim)
+        c, cend = decode_coordinates(b, offset, shape=shape, dtype=t, verbose=False)
         offset = cend
 
         return (cls(pca, c, b[cstart:cend]), offset)

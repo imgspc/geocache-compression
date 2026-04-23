@@ -227,25 +227,33 @@ class ApproximatedStream:
         )
 
 
-def encode_coordinates(data: np.ndarray, quality: float, verbose=False) -> bytes:
+def encode_coordinates(
+    data: np.ndarray, quality: Union[float, np.ndarray], verbose=False
+) -> bytes:
     """
-    Given an array of shape (nsamples, nverts, ndim) or (nverts, ndim), the latter of
-    which is reinterpreted as (1, nverts, ndim).
+    Given a vector, encode it as a stream. Quality must be a single value.
 
-    Output ndim streams each of which is the samples of each vertex,
-    concatenated.
+    Given an array of shape (..., ndim) encode ndim streams with error bound
+    quality[d] and return the whole, concatenated.
+
+    Quality can be one value used for every coordinate, or a vector of length
+    ndim denoting a separate quality per coordinate.
     """
-    if len(data.shape) == 2:
-        data = data[np.newaxis, :]
-    nsamples, nverts, ndim = data.shape
-    count = nsamples * nverts
+    ndim = data.shape[-1]
 
-    reordered = data.transpose(2, 0, 1)
-    by_dimension = reordered.reshape(ndim, count)
+    if not isinstance(quality, np.ndarray):
+        quality = np.full(ndim, quality)
+
+    if len(data.shape) == 1:
+        return ApproximatedStream(data, quality[0]).tobytes_dataonly(len(data))
+
+    # flatten the greater dimensions
+    count = int(np.prod(data.shape[:-1]))
+    flattened = data.reshape(count, ndim)
 
     def write_coordinate(d: int) -> bytes:
-        column = by_dimension[d, :]
-        stream = ApproximatedStream(column, quality)
+        column = flattened[:, d]
+        stream = ApproximatedStream(column, quality[d])
         return stream.tobytes_dataonly(count=count, verbose=verbose)
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=ndim)
@@ -259,24 +267,22 @@ def encode_coordinates(data: np.ndarray, quality: float, verbose=False) -> bytes
 def decode_coordinates(
     b: bytes,
     offset: int,
-    nsamples: Optional[int],
-    nverts: int,
-    ndim: int,
+    shape: Union[np.ndarray, tuple[int, ...], list[int]],
     dtype: Union[DTypeLike, type],
     verbose=False,
 ) -> tuple[np.ndarray, int]:
     """
-    Return an array of shape (nsamples, nverts, ndim) from the given byte
+    Return an array of the given shape from the given byte
     stream, plus the offset to the next byte to read.
 
     The bytes must have been output from encode_coordinates.
     """
-    if nsamples is None:
-        nsamples = 1
-        flatten_samples = True
+    if len(shape) == 1:
+        ndim = 1
+        count = shape[0]
     else:
-        flatten_samples = False
-    count = nsamples * nverts
+        ndim = shape[-1]
+        count = np.prod(shape[:-1])
 
     streams = []
     for d in range(ndim):
@@ -289,9 +295,11 @@ def decode_coordinates(
         )
         streams.append(stream)
 
-    by_dimension = np.array([stream.stream for stream in streams])
-    reordered = by_dimension.reshape((ndim, nsamples, nverts))
-    data = reordered.transpose(1, 2, 0)
-    if flatten_samples:
-        data = data.reshape((nverts, ndim))
+    if len(shape) == 1:
+        data = streams[0].stream
+    else:
+        # if we're returning an array we need to make coordinates be columns,
+        # then restore the original shape.
+        row_coords = np.array([stream.stream for stream in streams])
+        data = row_coords.T.reshape(shape)
     return data, offset
