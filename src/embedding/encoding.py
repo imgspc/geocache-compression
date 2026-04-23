@@ -145,20 +145,31 @@ class ApproximatedStream:
             )
         return header + data
 
+    class Header:
+        def __init__(self, offset, is_raw, headerlen, payloadlen):
+            self.offset = offset
+            self.is_raw = is_raw
+            self.headerlen = headerlen
+            self.payloadlen = payloadlen
+
+        def next_offset(self) -> int:
+            return self.offset + self.headerlen + self.payloadlen
+
     @staticmethod
-    def from_bytes_dataonly(
+    def read_dataonly_header(
         dtype: Union[DTypeLike, type],
         count: Optional[int],
         b: bytes,
         offset: int,
-        verbose=False,
-    ) -> tuple[ApproximatedStream, int]:
+        verbose: bool,
+    ) -> ApproximatedStream.Header:
         """
-        Read the data from the bytes.
+        Return:
+        * payloadlen
 
-        count is the number of values we expect to be decoding, if known
-        from exogenous data.  The corresponding to_bytes_dataonly call must
-        have the same count value (i.e. the same number, or both are None).
+        Useful to parallelize decompression.
+
+        See from_bytes_dataonly_with_header.
         """
         if count is None:
             (length,) = struct.unpack_from(">i", b, offset)
@@ -185,11 +196,27 @@ class ApproximatedStream:
             print(
                 f"reading {storage} {length} bytes + header {headerlen} = {length + headerlen}"
             )
-        offset += headerlen
-        payload = b[offset : offset + length]
-        offset += length
+        return ApproximatedStream.Header(offset, is_raw, headerlen, length)
 
-        if is_raw:
+    @staticmethod
+    def from_bytes_dataonly_with_header(
+        dtype: Union[DTypeLike, type],
+        count: Optional[int],
+        b: bytes,
+        h: ApproximatedStream.Header,
+        verbose: bool,
+    ) -> tuple[ApproximatedStream, int]:
+        """
+        Having read the header for this stream, decompress the actual data.
+
+        See from_bytes_dataonly.
+        """
+        offset = h.offset
+        offset += h.headerlen
+        payload = b[offset : offset + h.payloadlen]
+        offset += h.payloadlen
+
+        if h.is_raw:
             uncompressed: np.ndarray = np.frombuffer(payload, dtype=dtype)
         else:
             with temp_filename() as neatsfile:
@@ -207,6 +234,25 @@ class ApproximatedStream:
 
         astream = ApproximatedStream(uncompressed, epsilon=None)
         return (astream, offset)
+
+    @classmethod
+    def from_bytes_dataonly(
+        cls,
+        dtype: Union[DTypeLike, type],
+        count: Optional[int],
+        b: bytes,
+        offset: int,
+        verbose=False,
+    ) -> tuple[ApproximatedStream, int]:
+        """
+        Read the data from the bytes.
+
+        count is the number of values we expect to be decoding, if known
+        from exogenous data.  The corresponding to_bytes_dataonly call must
+        have the same count value (i.e. the same number, or both are None).
+        """
+        header = cls.read_dataonly_header(dtype, count, b, offset, verbose)
+        return cls.from_bytes_dataonly_with_header(dtype, count, b, header, verbose)
 
     def tobytes(self, verbose=False) -> bytes:
         return b"".join(
@@ -284,16 +330,27 @@ def decode_coordinates(
         ndim = shape[-1]
         count = np.prod(shape[:-1])
 
-    streams = []
+    headers: list[ApproximatedStream.Header] = []
     for d in range(ndim):
         if verbose:
             print(
                 f"read coord {d} starting at {offset} / {len(b)} ({len(b) - offset} remaining)"
             )
-        stream, offset = ApproximatedStream.from_bytes_dataonly(
+        header = ApproximatedStream.read_dataonly_header(
             dtype=dtype, count=count, b=b, offset=offset, verbose=verbose
         )
-        streams.append(stream)
+        headers.append(header)
+        offset = header.next_offset()
+
+    # Decompress in parallel.
+    def decompress(d: int) -> ApproximatedStream:
+        stream, _ = ApproximatedStream.from_bytes_dataonly_with_header(
+            dtype, count, b, headers[d], verbose=verbose
+        )
+        return stream
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=ndim)
+    streams = list(executor.map(decompress, range(ndim)))
 
     if len(shape) == 1:
         data = streams[0].stream
@@ -302,4 +359,4 @@ def decode_coordinates(
         # then restore the original shape.
         row_coords = np.array([stream.stream for stream in streams])
         data = row_coords.T.reshape(shape)
-    return data, offset
+    return data, headers[-1].next_offset()
