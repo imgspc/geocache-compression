@@ -52,6 +52,9 @@ _pack_fmts = (
     SmallIntPackFmt("<Q", 6, 0b011111, 8, 2269460991852608),
     SmallIntPackFmt("<Q", 6, 0b111111, 9, 290499837143564352),
 )
+# The first entry *must* be correct. The others, we fix up here.
+for i in range(1, len(_pack_fmts)):
+    _pack_fmts[i].base = _pack_fmts[i - 1].maxvalue()
 
 
 def pack_small_uint(i: int) -> bytes:
@@ -61,7 +64,7 @@ def pack_small_uint(i: int) -> bytes:
     index = bisect.bisect_right(_pack_fmts, i, key=lambda f: f.maxvalue())
     foo = _pack_fmts[index]
     if foo.nbytes == 9:
-        return b"\xff" + struct.pack(foo.fmt, i)
+        return bytes([foo.mask]) + struct.pack(foo.fmt, i)
     else:
         b = struct.pack(foo.fmt, ((i - foo.base) << foo.shift) | foo.mask)
         assert not np.any(b[foo.nbytes :])
