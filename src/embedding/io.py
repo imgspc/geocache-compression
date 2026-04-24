@@ -12,6 +12,7 @@ from typing import Any, Optional, Iterable, Union
 from numpy.typing import DTypeLike
 from embedding import embedding, clustering, metric
 from embedding.embedding import best_embedding
+from .encoding import executor
 
 # Inputs:
 #       .json -- provides nsamples, type, size, extent for all properties
@@ -270,12 +271,16 @@ def create_embedding(
     if verbose:
         print(f"  created {cover.nsubsets} clusters")
 
-    # TODO: parallelize the computation.
     clusters = list(clustering.slice(data, cover))
     assert len(clusters) == cover.nsubsets
 
-    embeddings = [embed_fn(cluster, quality, verbose=verbose) for cluster in clusters]
+    # In parallel, embed everything.
+    def do_embed(cluster) -> embedding.Embedding:
+        return embed_fn(cluster, quality, verbose=verbose)
 
+    embeddings = list(executor.map(do_embed, clusters))
+
+    # Now export everything.
     basename = os.path.splitext(header.binpath)[0]
     headersbin = basename + ".embed-header.bin"
     projectedbin = basename + ".embed.bin"
