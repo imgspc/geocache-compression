@@ -16,8 +16,8 @@ neats_dir = Path.home() / "projects/geocache-compression/install/bin"
 neats_compress = neats_dir / "neats_lossy_compress"
 neats_decompress = neats_dir / "neats_lossy_decompress"
 
-# Set up a thread pool with 100 threads for later use.
-executor = concurrent.futures.ThreadPoolExecutor(max_workers=100)
+# Set up a thread pool for encoding.
+_executor = concurrent.futures.ThreadPoolExecutor()
 
 
 def temp_filename():
@@ -305,7 +305,7 @@ def encode_coordinates(
         stream = ApproximatedStream(column, quality[d])
         return stream.tobytes_dataonly(count=count, verbose=verbose)
 
-    bytestreams = executor.map(write_coordinate, range(ndim))
+    bytestreams = _executor.map(write_coordinate, range(ndim))
     b = b"".join(bytestreams)
     if verbose:
         print(f"output of {ndim} streams is {len(b)} bytes")
@@ -351,7 +351,7 @@ def decode_coordinates(
         )
         return stream
 
-    streams = list(executor.map(decompress, range(ndim)))
+    streams = list(_executor.map(decompress, range(ndim)))
 
     if len(shape) == 1:
         data = streams[0].stream
