@@ -40,9 +40,10 @@ class Codec:
     Basic capability to read/write a vector of floats in a specific encoding.
     """
 
+    @classmethod
     @abstractmethod
     def tobytes(
-        self, data: np.ndarray, quality: float, verbose: bool
+        cls, data: np.ndarray, quality: float, verbose: bool
     ) -> Optional[bytes]: ...
 
     @classmethod
@@ -53,8 +54,9 @@ class Codec:
 
 
 class RawCodec(Codec):
+    @classmethod
     def tobytes(
-        self, data: np.ndarray, quality: float, verbose: bool
+        cls, data: np.ndarray, quality: float, verbose: bool
     ) -> Optional[bytes]:
         return data.tobytes()
 
@@ -66,8 +68,9 @@ class RawCodec(Codec):
 
 
 class NeatsCodec(Codec):
+    @classmethod
     def tobytes(
-        self, data: np.ndarray, quality: float, verbose: bool
+        cls, data: np.ndarray, quality: float, verbose: bool
     ) -> Optional[bytes]:
         if data.dtype != np.float32:
             # TODO: handle float64 and float16
@@ -114,6 +117,9 @@ class NeatsCodec(Codec):
                 return np.fromfile(binfile.name, dtype=dtype)
 
 
+_codecs = [RawCodec, NeatsCodec]
+
+
 class ApproximatedStream:
     """
     Represents a stream of data that will be encoded lossily to precision epsilon.
@@ -147,59 +153,43 @@ class ApproximatedStream:
         if self.epsilon is None:
             raise ValueError("unable to re-compress a stream")
 
-        compressed = NeatsCodec().tobytes(self.stream, self.epsilon, verbose)
-        raw = RawCodec().tobytes(self.stream, self.epsilon, verbose)
-        assert raw is not None
+        encodings = [
+            codec.tobytes(self.stream, self.epsilon, verbose) for codec in _codecs
+        ]
+        valid = [
+            (index, encoding)
+            for (index, encoding) in enumerate(encodings)
+            if encoding is not None
+        ]
+        # The raw encoding is always valid.
+        assert len(valid) >= 1
 
-        compressed_header = 4
-        raw_header = 4 if count is None else 1
+        def key(ce: tuple[int, bytes]) -> int:
+            return len(ce[1])
+
+        best_index, data = min(valid, key=key)
 
         # Encoding:
-        # if we're storing compressed, length in bytes as positive big-endian signed int
-        # if we're storing raw:
-        #       if count is known, header is 0xff
-        #       if count is not known, header is 4-byte signed int, corresponds to -length in bytes
-        if compressed is None:
-            use_raw = True
-        elif len(raw) + raw_header <= len(compressed) + compressed_header:
-            use_raw = True
-        else:
-            use_raw = False
+        # codec index (1 byte)
+        # payload length in bytes, written as a small_uint -- unless this is known
+        #       (namely: count is known and the codec is raw)
+        # encoded stream
 
-        if use_raw:
-            data = raw
-            if count is not None:
-                header = b"\xff"
-                # length is unrestricted
-            else:
-                header = struct.pack(">i", -len(raw))
-
-                # check the length is in bounds (we can negate it)
-                if len(raw) >= 0xA0000000:
-                    raise NotImplementedError(
-                        "length {len(data)} too long; TODO: support 64-bit length"
-                    )
-        else:
-            assert compressed is not None
-            data = compressed
-            header = struct.pack(">i", len(compressed))
-
-            # check the length is in bounds (positive as int32)
-            if len(compressed) >= 0xA0000000:
-                raise NotImplementedError(
-                    "length {len(data)} too long; TODO: support 64-bit length"
-                )
+        header = struct.pack("B", best_index)
+        if count is None or _codecs[best_index] is not RawCodec:
+            header += pack_small_uint(len(data))
         if verbose:
-            storage = "raw" if use_raw else "compressed"
             print(
-                f"wrote {storage} {len(data)} bytes + header {len(header)} = {len(data) + len(header)}"
+                f"wrote {len(self.stream)} values in {len(header)} + {len(data)} = {len(header) + len(data)} bytes"
             )
         return header + data
 
     class Header:
-        def __init__(self, offset, is_raw, headerlen, payloadlen):
+        def __init__(
+            self, offset: int, codec_index: int, headerlen: int, payloadlen: int
+        ):
             self.offset = offset
-            self.is_raw = is_raw
+            self.codec_index = codec_index
             self.headerlen = headerlen
             self.payloadlen = payloadlen
 
@@ -215,39 +205,27 @@ class ApproximatedStream:
         verbose: bool,
     ) -> ApproximatedStream.Header:
         """
-        Return:
-        * payloadlen
+        Return the header (codec, header length, payload length) but don't decode payload yet.
 
-        Useful to parallelize decompression.
+        Useful to schedule parallel decompression.
 
         See from_bytes_dataonly_with_header.
         """
-        if count is None:
-            (length,) = struct.unpack_from(">i", b, offset)
-            headerlen = 4
-
-            if length <= 0:
-                # negative or zero means raw (because -0 is still zero).
-                length = -length
-                is_raw = True
-            else:
-                is_raw = False
+        start_offset = offset
+        (codec_index,) = struct.unpack_from("B", b, offset=offset)
+        offset += 1
+        if count is not None and _codecs[codec_index] == RawCodec:
+            length = count * np.dtype(dtype).itemsize
         else:
-            if b[offset] == 0xFF:
-                is_raw = True
-                length = count * np.dtype(dtype).itemsize
-                headerlen = 1
-            else:
-                is_raw = False
-                (length,) = struct.unpack_from(">I", b, offset)
-                headerlen = 4
+            length, offset = unpack_small_uint(b, offset)
+        headerlen = offset - start_offset
 
         if verbose:
-            storage = "raw" if is_raw else "compressed"
+            storage = _codecs[codec_index].__name__
             print(
                 f"reading {storage} {length} bytes + header {headerlen} = {length + headerlen}"
             )
-        return ApproximatedStream.Header(offset, is_raw, headerlen, length)
+        return ApproximatedStream.Header(start_offset, codec_index, headerlen, length)
 
     @staticmethod
     def from_bytes_dataonly_with_header(
@@ -267,7 +245,7 @@ class ApproximatedStream:
         payload = b[offset : offset + h.payloadlen]
         offset += h.payloadlen
 
-        codec = RawCodec if h.is_raw else NeatsCodec
+        codec = _codecs[h.codec_index]
         uncompressed = codec.from_bytes(payload, dtype, verbose)
         astream = ApproximatedStream(uncompressed, epsilon=None)
         return (astream, offset)
