@@ -6,6 +6,8 @@ import math
 
 from typing import Iterator, Sequence, Callable
 
+from .util import intwidth_to_type, intrange_to_width
+
 
 def _is_sorted(a: np.ndarray):
     # is_sorted is somehow not a native operation, have to do this nonsense
@@ -141,22 +143,68 @@ class Covering:
         Return a covering plus return the new offset after reading the covering
         from the bytes stream.
         """
-        # TODO: compress this. It would delta-code to nothingness.
+        # First a header byte.
+        # Byte length of indices (0, 1, 2, 4) -- zero means id permutation
+        # Are indices diff-coded?
+        # Are indices signed?
+        # Byte length of counts (0, 1, 2, 4) -- zero means monolithic
+        # Are counts diff-coded?
+        # Are counts signed?
 
-        # Read the length of the covering, then the covering.
-        nindices = struct.unpack_from(">I", b, offset)[0]
-        offset += 4
-        indices = np.frombuffer(b, dtype=np.uint32, count=nindices, offset=offset)
-        offset += nindices * indices.itemsize
+        # Next, indices:
+        # uint32 count
+        # if zero-length: no more bytes
+        # read signed/unsigned 1, 2, or 4-byte indices/diffs
+        # if it's diffs, compute the cumulative sum to get the real answer
 
-        # Read the length of the offsets, then the offsets.
-        noffsets = struct.unpack_from(">I", b, offset)[0]
+        # Next, counts:
+        # if monolithic, empty
+        # else: small_uint count of clusters (excluding last cluster)
+        # read signed/unsigned 1, 2, or 4-byte counts/diffs
+        # if it's diffs, compute the cumulative sum to get the real answer
+
+        header = b[offset]
+        offset += 1
+        index_length = (header & 0b11000000) >> 6
+        index_diff = bool(header & 0b00100000)
+        index_sign = bool(header & 0b00010000)
+        count_length = (header & 0b1100) >> 2
+        count_diff = bool(header & 0b0010)
+        count_sign = bool(header & 0b0001)
+
+        # Compute the indices.
+        (nindices,) = struct.unpack_from("<I", b, offset)
         offset += 4
-        if noffsets > 0:
-            offsets = np.frombuffer(b, dtype=np.uint32, count=noffsets, offset=offset)
-            offset += noffsets * offsets.itemsize
+        if index_length == 0:
+            indices = np.arange(nindices, dtype=np.uint32)
         else:
-            offsets = np.array([], dtype=np.int32)
+            t = intwidth_to_type(index_length, index_sign)
+            assert t is not None
+            indices = np.frombuffer(b, dtype=t, count=nindices, offset=offset)
+            offset += nindices * indices.itemsize
+
+            indices = indices.astype(int)
+            if index_diff:
+                indices = indices.cumsum()
+
+        # Compute the offsets.
+        if count_length == 0:
+            # Monolithic.
+            offsets = np.array([], dtype=int)
+        else:
+            (ncounts,) = struct.unpack_from("<I", b, offset)
+            offset += 4
+            t = intwidth_to_type(count_length, count_sign)
+            assert t is not None
+            counts: np.ndarray = np.frombuffer(b, dtype=t, count=ncounts, offset=offset)
+            offset += ncounts * counts.itemsize
+
+            counts = counts.astype(int)
+            if count_diff:
+                counts = counts.cumsum()
+            # Turn counts into offsets. Unlike in from_indices_and_counts we don't
+            # have a redundant last count to ignore.
+            offsets = counts.cumsum()
 
         return (Covering(indices, offsets), offset)
 
@@ -164,13 +212,70 @@ class Covering:
         """
         Return bytes that frombytes can read and recreate into a Covering object.
         """
-        # Output the two arrays, with lengths.
+
+        # Diff-encode and return whether there's any negative diffs, and what bit width we need.
+        # width i means we will need 2^{2+i} bits
+        # width 1 => int8
+        # width 2 => int16
+        # width 3 => int32
+        def difference(base: np.ndarray) -> np.ndarray:
+            if len(base) == 0:
+                return base
+            return np.ediff1d(base, to_begin=base[0])
+
+        def header_nibble(length, diff, sign) -> int:
+            if length < 0 or length > 3:
+                raise ValueError(f"length {length} out of bounds")
+            blength = length << 2
+            bdiff = 0b10 if diff else 0
+            bsign = 0b1 if sign else 0
+            return blength | bdiff | bsign
+
+        def better_nibble(base: np.ndarray) -> tuple[int, np.ndarray]:
+            """
+            Return the better nibble.
+            Return the array to encode, cast to the appropriate type.
+            """
+            width, sign = intrange_to_width(base)
+            diff = difference(base)
+            diff_width, diff_sign = intrange_to_width(diff)
+
+            if width <= diff_width:
+                nibble = header_nibble(width, False, sign)
+                return nibble, base.astype(intwidth_to_type(width, sign))
+            else:
+                nibble = header_nibble(diff_width, True, diff_sign)
+                return nibble, diff.astype(intwidth_to_type(diff_width, diff_sign))
+
+        if self.is_id_permutation():
+            index_nibble = header_nibble(0, False, False)
+            indices = np.array([], dtype=np.uint8)
+        else:
+            # try bare indices or diffed indices
+            index_nibble, indices = better_nibble(self.indices)
+
+        if len(self.offsets) == 0:
+            count_nibble = header_nibble(0, False, False)
+            counts = np.array([], dtype=np.uint8)
+        else:
+            # always diff because offsets, diffed, are monotonic increasing
+            # (it's the counts). Try diffing twice just for kicks.
+            base_counts = difference(self.offsets)
+            count_nibble, counts = better_nibble(base_counts)
+
+        header = bytes([np.uint8((index_nibble << 4) | count_nibble)])
+        nindices = struct.pack("<I", len(self.indices))
+        index_bytes = indices.tobytes()
+        ncounts = struct.pack("<I", len(self.offsets)) if len(self.offsets) else b""
+        count_bytes = counts.tobytes()
+
         return b"".join(
             (
-                struct.pack(">I", len(self.indices)),
-                self.indices.tobytes(),
-                struct.pack(">I", len(self.offsets)),
-                self.offsets.tobytes(),
+                header,
+                nindices,
+                index_bytes,
+                ncounts,
+                count_bytes,
             )
         )
 

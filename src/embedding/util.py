@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import struct
 
+from typing import Optional
+
 
 def pack_small_uint(i: int) -> bytes:
     """
@@ -88,3 +90,41 @@ def pack_dtype(t: np.dtype) -> bytes:
 def unpack_dtype(b: bytes, offset: int = 0) -> tuple[type, int]:
     i = struct.unpack_from("B", b, offset)[0]
     return (int_to_dtype(i), offset + 1)
+
+
+def intrange_to_width(a: np.ndarray) -> tuple[int, bool]:
+    """
+    Return 1, 2 or 3 depending on whether the range of integer values fit
+    in int8, int16, or int32 (or their unsigned counterparts).
+
+    Return true if we need the sign, false if unsigned.
+    """
+    lo = np.min(a)
+    hi = np.max(a)
+    signed = lo < 0
+    if signed:
+        if lo >= -128 and hi < 127:
+            return 1, signed
+        if lo >= -32768 and hi < 32767:
+            return 2, signed
+        else:
+            return 3, signed
+    else:
+        if hi < 255:
+            return 1, signed
+        if hi < 65535:
+            return 2, signed
+        else:
+            return 3, signed
+
+
+def intwidth_to_type(length: int, sign: bool) -> Optional[type]:
+    if length == 0:
+        return None
+    if length < 0 or length > 3:
+        raise ValueError(f"Invalid int width {length}")
+    if sign:
+        t: tuple[type, type, type] = (np.int8, np.int16, np.int32)
+    else:
+        t = (np.uint8, np.uint16, np.uint32)
+    return t[length - 1]

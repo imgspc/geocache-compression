@@ -16,19 +16,28 @@ class ClusteringTestCase(unittest.TestCase):
         self.assertTrue(clustering._is_sorted(np.array([])))
 
     def test_covering_api(self) -> None:
-        covering = clustering.Covering(np.arange(5), np.array([]))
-        self.assertEqual(1, covering.nsubsets)
+        covering = clustering.Covering(np.arange(5), np.array([2]))
+        self.assertEqual(2, covering.nsubsets)
         self.assertTrue(covering.is_id_permutation())
-        for subset in covering.subsets:
-            self.assertTrue(np.all(np.arange(5) == subset))
+        subsets = list(covering.subsets)
+        self.assertTrue(np.all(np.arange(2) == subsets[0]))
+        self.assertTrue(np.all(np.arange(2, 5) == subsets[1]))
         with self.assertRaises(ValueError):
             covering.indices[3] = 7
             covering.verify()
-            covering.indices[3] = 3
+        covering.indices[3] = 3
 
-        # TODO: multiple subsets
+        b = covering.tobytes()
+        covering2, offset = clustering.Covering.from_bytes(b, offset=0)
+        self.assertEqual(len(b), offset)
+        self.assertTrue(np.all(np.arange(5) == covering2.indices))
+        self.assertEqual(2, covering.nsubsets)
+        self.assertTrue(covering.is_id_permutation())
+        subsets2 = list(covering2.subsets)
+        self.assertTrue(np.all(np.arange(2) == subsets2[0]))
+        self.assertTrue(np.all(np.arange(2, 5) == subsets2[1]))
+
         # TODO: the various constructors
-        # TODO: serialization
 
     def test_covering_by_index(self) -> None:
         csize = 11
