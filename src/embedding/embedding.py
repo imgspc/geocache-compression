@@ -356,7 +356,15 @@ class FlatCenteredPCA:
     flatten the data of shape (nsamples, nvertices, ndim) into shape (n, m).
     """
 
-    def __init__(self, n: int, m: int, k: int, WVt: np.ndarray):
+    def __init__(
+        self,
+        n: int,
+        m: int,
+        k: int,
+        WVt: np.ndarray,
+        U: Optional[np.ndarray],
+        quality: Optional[np.ndarray],
+    ):
         """
         Most users will want to use `from_data` or `from_bytes` rather than directly
         using the constructor.
@@ -365,7 +373,8 @@ class FlatCenteredPCA:
         self.m = m
         self.k = k
         self.WVt = WVt
-        self.U: Optional[np.ndarray] = None
+        self.U = U
+        self.quality = quality
 
     @classmethod
     def is_valid(cls, data: Domain, quality: float) -> bool:
@@ -395,34 +404,39 @@ class FlatCenteredPCA:
         The U array is not serialized, so calling `project` after deserializing
         will not give the identical result due to roundoff.
         """
+        assert self.quality is not None
         return b"".join(
             (
                 pack_small_uint(self.n),
                 pack_small_uint(self.m),
                 pack_small_uint(self.k),
                 pack_dtype(self.WVt.dtype),
-                self.WVt.tobytes(),
+                encode_coordinates(self.WVt.T, self.quality),
             )
         )
 
     @classmethod
-    def _epsilon(cls, U: np.ndarray, WVt: np.ndarray, q: float) -> np.ndarray:
+    def _epsilon(cls, A: np.ndarray, B: np.ndarray, q: float) -> np.ndarray:
         """
-        Given the SVD as U W Vt where we already multiplied WVt, return error
-        bounds for each column of U and every row of WVt that, after encoding,
-        ensure error will be bounded by q.
+        Given two matrices A and B that we're mulitplying together, find a
+        vector of roundoff values that enaure the maximum error is below q. We
+        will round off corresponding columns of A and rows of B to the same
+        value but each column/row pair gets a different epsilon.
         """
-        # Compute:
-        # eps_k^2 + eps_k(maxU_k + maxV_k) - q/d == 0
-        # eps = [sqrt((maxU + maxV)^2 + 4q/d) - (maxU + maxV)] / 2
-        # maxU + maxV gets squared so do the calculation in 64-bit, and return to
+        # eps_k^2 + eps_k(maxA_k + maxB_k) - q/d == 0
+        # eps = [sqrt((maxA + maxB)^2 + 4q/d) - (maxA + maxB)] / 2
+        # maxA + maxB gets squared so do the calculation in 64-bit, and return to
         # lower precision later.
-        maxU = np.max(U, axis=0).astype(np.float64)
-        maxV = np.max(WVt, axis=1).astype(np.float64)
-        assert len(maxU) == len(maxV)
-        d = len(maxU)
-        maxUV = maxU + maxV
-        return (0.5 * (np.sqrt(4 * q / d + maxUV.square()) - maxUV)).astype(U.dtype)
+        maxA = np.max(np.fabs(A), axis=0).astype(np.float64)
+        maxB = np.max(np.fabs(B), axis=1).astype(np.float64)
+        d = len(maxA)
+        maxAB = maxA + maxB
+
+        assert len(maxA) == len(maxB)
+        assert A.dtype == B.dtype
+
+        eps = (0.5 * (np.sqrt(4 * q / d + np.square(maxAB)) - maxAB)).astype(A.dtype)
+        return eps
 
     @classmethod
     def from_data(
@@ -499,25 +513,28 @@ class FlatCenteredPCA:
             count = 0
             # TODO: return None
 
-        # Commit to the max level of roundoff that we found that stays within bounds.
         # Make copies to release the truncated bits.
-        roundoff = error(count)
         if count > 0:
             U = np.array(U[:, 0:-count], copy=True)
             s = np.array(s[0:-count], copy=True)
             Vt = np.array(Vt[0:-count, :], copy=True)
+        WVt = np.diag(s) @ Vt
+
+        # Compute how much we can round off.
+        existing_roundoff = error(count)
+        if existing_roundoff >= quality:
+            existing_roundoff = 0  # TODO: we shouldn't be here, just give up
+        epsilon = cls._epsilon(U, WVt, quality - existing_roundoff)
 
         if verbose:
             if count > 0:
                 print(
-                    f"PCA reduced {count} dimensions from {M.shape} to {U.shape} and {Vt.shape} with error {roundoff}"
+                    f"PCA reduced {count} dimensions from {M.shape} to {U.shape} and {Vt.shape} with error {existing_roundoff}"
                 )
             else:
                 print(f"PCA unable to reduce dimensions")
 
-        WVt = np.diag(s) @ Vt
-        embedding = cls(n, m, len(s), WVt)
-        embedding.U = U
+        embedding = cls(n, m, len(s), WVt, U, epsilon)
         return embedding
 
     @classmethod
@@ -530,22 +547,19 @@ class FlatCenteredPCA:
         m, offset = unpack_small_uint(b, offset)
         k, offset = unpack_small_uint(b, offset)
         t, offset = unpack_dtype(b, offset)
-        assert issubclass(t, np.number)
-        tsize = t(0).itemsize
+        # we stored WVt transposed, so the shape is (m,k) not (k,m)
+        WV, offset = decode_coordinates(b, offset, dtype=t, shape=(m, k))
+        WVt = WV.T
 
-        WVt_flat = np.frombuffer(b, offset=offset, dtype=t, count=k * m)
-        WVt = np.reshape(WVt_flat, (k, m))
-        offset += tsize * k * m
+        return (cls(n, m, k, WVt, U=None, quality=None), offset)
 
-        return (cls(n, m, k, WVt), offset)
+    def write_projection(self, U: np.ndarray) -> bytes:
+        if self.quality is None:
+            raise ValueError("can't re-encode")
+        return encode_coordinates(U, self.quality)
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
-        t = self.WVt.dtype
-        U_flat = np.frombuffer(b, offset=offset, dtype=t, count=self.k * self.n)
-        U = np.reshape(U_flat, (self.n, self.k))
-        offset += t.itemsize * self.k * self.n
-
-        return (U, offset)
+        return decode_coordinates(b, offset, (self.n, self.k), self.WVt.dtype)
 
 
 class AbstractPCAEmbedding(Embedding):
@@ -682,7 +696,7 @@ class AbstractPCAEmbedding(Embedding):
         return (cls(pca, c, b[cstart:cend]), offset)
 
     def write_projection(self, projected: Reduced) -> bytes:
-        return projected.tobytes()
+        return self.pca.write_projection(projected)
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
         return self.pca.read_projection(b, offset)
