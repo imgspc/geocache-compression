@@ -1,32 +1,71 @@
 from __future__ import annotations
 
+import bisect
 import numpy as np
 import struct
 
 from typing import Optional
 
 
+class SmallIntPackFmt:
+    """
+    We use part of the first byte (least-significant byte) to encode the
+    number of additional bytes. If the least bits are
+        00 = 1 byte, total 6 bits, [0,64)
+        01 = 2 bytes, total 14 bits, [64, 16448)
+        10 = 3 bytes, total 22 bits, [16448, 4210752)
+        0011 => 4 bytes, total 28 bits [4210752, 272646208)
+        0111 => 5 bytes, total 36 bits [272646208, 68992122944)
+        1011 => 6 bytes, total 44 bits [68992122944, 17661178167360)
+        01111 => 7 bytes, total 51 bits [17661178167360, 2269460991852608)
+        011111 => 8 bytes, total 58 bits [2269460991852608, 290499837143564352)
+        111111 => ignore header byte, read 8-byte unsigned after, total of 9 bytes
+
+    This depends on writing little-endian so the least significant byte goes
+    first.
+    """
+
+    def __init__(self, fmt, shift, mask, nbytes, base):
+        self.fmt = fmt
+        self.shift = shift
+        self.mask = mask
+        self.nbytes = nbytes
+        self.base = base
+
+    def matches(self, byte) -> bool:
+        mask = (1 << self.shift) - 1
+        return (byte & mask) == self.mask
+
+    def maxvalue(self) -> int:
+        nbits = self.nbytes * 8 - self.shift
+        return self.base + (1 << nbits)
+
+
+_pack_fmts = (
+    SmallIntPackFmt("<B", 2, 0b00, 1, 0),
+    SmallIntPackFmt("<H", 2, 0b01, 2, 64),
+    SmallIntPackFmt("<I", 2, 0b10, 3, 16448),
+    SmallIntPackFmt("<Q", 4, 0b0011, 4, 4210752),
+    SmallIntPackFmt("<Q", 4, 0b0111, 5, 272646208),
+    SmallIntPackFmt("<Q", 4, 0b1011, 6, 68992122944),
+    SmallIntPackFmt("<Q", 5, 0b01111, 7, 68992122944),
+    SmallIntPackFmt("<Q", 6, 0b011111, 8, 2269460991852608),
+    SmallIntPackFmt("<Q", 6, 0b111111, 9, 290499837143564352),
+)
+
+
 def pack_small_uint(i: int) -> bytes:
     """
     Pack an unsigned int that is assumed to be small.
-    Store the first byte. If it doesn't fit, keep trying.
-    Store the first half-int. If it doesn't fit, keep trying.
-    Store the first int. If it doesn't fit, keep trying.
-    Store the remaining quad. If it doesn't fit, something is wrong with you.
     """
-    if i < 255:
-        return struct.pack(">B", i)
+    index = bisect.bisect_right(_pack_fmts, i, key=lambda f: f.maxvalue())
+    foo = _pack_fmts[index]
+    if foo.nbytes == 9:
+        return b"\xff" + struct.pack(foo.fmt, i)
     else:
-        i -= 255
-        if i < 65535:
-            return struct.pack(">BH", 255, i)
-        else:
-            i -= 65535
-            if i < 4294967295:
-                return struct.pack(">BHI", 255, 65535, i)
-            else:
-                i -= 4294967295
-                return struct.pack(">BHIQ", 255, 65535, 4294967295, i)
+        b = struct.pack(foo.fmt, ((i - foo.base) << foo.shift) | foo.mask)
+        assert not np.any(b[foo.nbytes :])
+        return b[: foo.nbytes]
 
 
 def unpack_small_uint(b: bytes, offset: int = 0) -> tuple[int, int]:
@@ -34,24 +73,20 @@ def unpack_small_uint(b: bytes, offset: int = 0) -> tuple[int, int]:
     Read a presumed-small uint written via pack_small_uint.
     Return the value we read, followed by the new offset.
     """
-    i = struct.unpack_from(">B", b, offset)[0]
-    offset += 1
-    if i < 255:
-        return (i, offset)
+    header = b[offset]
+    foo = next((pf for pf in _pack_fmts if pf.matches(header)))
+    if foo.nbytes == 9:
+        (i,) = struct.unpack_from(foo.fmt, b, offset + 1)
     else:
-        i += struct.unpack_from(">H", b, offset)[0]
-        offset += 2
-        if i < 255 + 65535:
-            return (i, offset)
-        else:
-            i += struct.unpack_from(">I", b, offset)[0]
-            offset += 4
-            if i < 255 + 65535 + 4294967295:
-                return (i, offset)
-            else:
-                i += struct.unpack_from(">Q", b, offset)[0]
-                offset += 8
-                return (i, offset)
+        # We truncate high-order zeroes so we can't just read the format
+        # from the buffer. We need to read out the payload and extend it
+        # as needed. There must be a better way than this hackery:
+        payload = np.zeros(struct.calcsize(foo.fmt), dtype=np.uint8)
+        values = np.frombuffer(b, offset=offset, count=foo.nbytes, dtype=np.uint8)
+        payload[: foo.nbytes] = values
+        (mangled,) = struct.unpack_from(foo.fmt, payload)
+        i = foo.base + (mangled >> foo.shift)
+    return i, offset + foo.nbytes
 
 
 def dtype_to_int(t: np.dtype) -> int:
