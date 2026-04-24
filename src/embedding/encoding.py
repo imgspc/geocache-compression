@@ -7,10 +7,17 @@ import subprocess
 import tempfile
 import concurrent.futures
 
+from abc import abstractmethod
 from typing import Optional, Union
 from numpy.typing import DTypeLike
 from pathlib import Path
-from .util import pack_small_uint, unpack_small_uint, pack_dtype, unpack_dtype
+from .util import (
+    pack_small_uint,
+    unpack_small_uint,
+    pack_dtype,
+    unpack_dtype,
+    float_to_hex,
+)
 
 neats_dir = Path.home() / "projects/geocache-compression/install/bin"
 neats_compress = neats_dir / "neats_lossy_compress"
@@ -28,9 +35,90 @@ def temp_filename():
     return tempfile.NamedTemporaryFile(delete_on_close=False)
 
 
+class Codec:
+    """
+    Basic capability to read/write a vector of floats in a specific encoding.
+    """
+
+    @abstractmethod
+    def tobytes(
+        self, data: np.ndarray, quality: float, verbose: bool
+    ) -> Optional[bytes]: ...
+
+    @classmethod
+    @abstractmethod
+    def from_bytes(
+        cls, payload: bytes, dtype: Union[type, DTypeLike], verbose: bool
+    ) -> np.ndarray: ...
+
+
+class RawCodec(Codec):
+    def tobytes(
+        self, data: np.ndarray, quality: float, verbose: bool
+    ) -> Optional[bytes]:
+        return data.tobytes()
+
+    @classmethod
+    def from_bytes(
+        cls, payload: bytes, dtype: Union[type, DTypeLike], verbose: bool
+    ) -> np.ndarray:
+        return np.frombuffer(payload, dtype=dtype)
+
+
+class NeatsCodec(Codec):
+    def tobytes(
+        self, data: np.ndarray, quality: float, verbose: bool
+    ) -> Optional[bytes]:
+        if data.dtype != np.float32:
+            # TODO: handle float64 and float16
+            return None
+        if len(data) == 0:
+            return None
+        with temp_filename() as binfile:
+            with temp_filename() as neatsfile:
+                data.tofile(binfile)
+
+                binfile.close()
+                neatsfile.close()
+
+                args = [
+                    neats_compress,
+                    binfile.name,
+                    "-o",
+                    neatsfile.name,
+                    "-q",
+                    float_to_hex(quality),
+                ]
+                if verbose:
+                    args.append("-v")
+                subprocess.run(args)
+
+                with open(neatsfile.name, "rb") as f:
+                    return f.read()
+
+    @classmethod
+    def from_bytes(
+        cls, payload: bytes, dtype: Union[type, DTypeLike], verbose: bool
+    ) -> np.ndarray:
+        with temp_filename() as neatsfile:
+            with temp_filename() as binfile:
+                neatsfile.write(payload)
+                neatsfile.close()
+                binfile.close()
+
+                args = [neats_decompress, neatsfile.name, "-o", binfile.name]
+                if verbose:
+                    subprocess.run(args)
+                else:
+                    subprocess.run(args, stdout=subprocess.DEVNULL)
+                return np.fromfile(binfile.name, dtype=dtype)
+
+
 class ApproximatedStream:
     """
     Represents a stream of data that will be encoded lossily to precision epsilon.
+
+    Chooses the best codec.
     """
 
     def __init__(
@@ -48,47 +136,6 @@ class ApproximatedStream:
         self.stream = stream
         self.epsilon = epsilon
 
-    def _quality_to_hex(self) -> str:
-        if self.epsilon is None:
-            raise ValueError("unable to compress a stream without an error bound")
-        if self.stream.dtype != np.float32:
-            raise NotImplementedError("compression only available for float32")
-        fbits = struct.pack("f", self.epsilon)
-        (unsigned,) = struct.unpack("I", fbits)
-        return "0x" + hex(unsigned)
-
-    def _tobytes_compressed(self, verbose: bool) -> Optional[bytes]:
-        """
-        Compress the stream and return its bytes.
-        """
-        if self.stream.dtype != np.float32:
-            return None
-        if len(self.stream) == 0:
-            return None
-        with temp_filename() as binfile:
-            with temp_filename() as neatsfile:
-                self.stream.tofile(binfile)
-                binfile.close()
-                neatsfile.close()
-
-                args = [
-                    neats_compress,
-                    binfile.name,
-                    "-o",
-                    neatsfile.name,
-                    "-q",
-                    self._quality_to_hex(),
-                ]
-                if verbose:
-                    args.append("-v")
-                subprocess.run(args)
-
-                with open(neatsfile.name, "rb") as f:
-                    return f.read()
-
-    def _tobytes_raw(self, verbose: bool) -> bytes:
-        return self.stream.tobytes()
-
     def tobytes_dataonly(self, count: Optional[int], verbose=False) -> bytes:
         """
         Return the bytes just of the data stream.
@@ -100,8 +147,9 @@ class ApproximatedStream:
         if self.epsilon is None:
             raise ValueError("unable to re-compress a stream")
 
-        compressed = self._tobytes_compressed(verbose)
-        raw = self._tobytes_raw(verbose)
+        compressed = NeatsCodec().tobytes(self.stream, self.epsilon, verbose)
+        raw = RawCodec().tobytes(self.stream, self.epsilon, verbose)
+        assert raw is not None
 
         compressed_header = 4
         raw_header = 4 if count is None else 1
@@ -219,22 +267,8 @@ class ApproximatedStream:
         payload = b[offset : offset + h.payloadlen]
         offset += h.payloadlen
 
-        if h.is_raw:
-            uncompressed: np.ndarray = np.frombuffer(payload, dtype=dtype)
-        else:
-            with temp_filename() as neatsfile:
-                with temp_filename() as binfile:
-                    neatsfile.write(payload)
-                    neatsfile.close()
-                    binfile.close()
-
-                    args = [neats_decompress, neatsfile.name, "-o", binfile.name]
-                    if verbose:
-                        subprocess.run(args)
-                    else:
-                        subprocess.run(args, stdout=subprocess.DEVNULL)
-                    uncompressed = np.fromfile(binfile.name, dtype=dtype)
-
+        codec = RawCodec if h.is_raw else NeatsCodec
+        uncompressed = codec.from_bytes(payload, dtype, verbose)
         astream = ApproximatedStream(uncompressed, epsilon=None)
         return (astream, offset)
 

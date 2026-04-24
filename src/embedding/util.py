@@ -128,3 +128,10 @@ def intwidth_to_type(length: int, sign: bool) -> Optional[type]:
     else:
         t = (np.uint8, np.uint16, np.uint32)
     return t[length - 1]
+
+
+def float_to_hex(value: float) -> str:
+    # TODO: handle float64 vs float32 (we're doing 32 here)
+    fbits = struct.pack("f", value)
+    (unsigned,) = struct.unpack("I", fbits)
+    return "0x" + hex(unsigned)
