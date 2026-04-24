@@ -3,6 +3,10 @@ from embedding import encoding
 import numpy as np
 import os
 
+from embedding.tests.test_data import complex_data
+
+from typing import Optional
+
 
 class EncodingTestCase(unittest.TestCase):
     def test_neats_exists(self) -> None:
@@ -19,22 +23,44 @@ class EncodingTestCase(unittest.TestCase):
             self.assertTrue(os.path.exists(fname))
         self.assertFalse(os.path.exists(fname))
 
-    @unittest.expectedFailure
-    def test_roundtrip_exact(self) -> None:
+    def _test_codec(
+        self, codec, data: Optional[np.ndarray] = None, quality: float = 0.1
+    ) -> None:
+        if data is None:
+            data = complex_data().flatten()
+        b = codec.tobytes(data, quality, verbose=False)
+        self.assertTrue(b is not None)
+        after = codec.from_bytes(b, dtype=np.float32, verbose=False)
+        self.assertEqual(len(after), len(data))
+        self.assertTrue(np.allclose(data, after, rtol=0, atol=quality))
+
+    def test_raw_codec(self) -> None:
+        self._test_codec(encoding.RawCodec)
+
+        # raw is lossless
         data = np.arange(1235, dtype=np.float32)
-        stream = encoding.ApproximatedStream(data, 0.1)
-        encoded = stream.tobytes(verbose=True)
-        newstream, offset = encoding.ApproximatedStream.from_bytes(
-            encoded, verbose=True
-        )
-        self.assertEqual(offset, len(encoded))
-        decodeddata = newstream.stream
-        print(f"data: {data}")
-        print(f"decoded: {decodeddata}")
-        print(f"diff: {decodeddata - data}")
-        print(f"maxdiff: {np.max(np.fabs(decodeddata - data))}")
-        print(f"non-zero indices: {np.nonzero(decodeddata - data)}")
-        self.assertTrue(np.all(data == decodeddata))
+        encoded = encoding.RawCodec.tobytes(data, 0.1, verbose=False)
+        self.assertFalse(encoded is None)
+        assert encoded is not None
+        decoded = encoding.RawCodec.from_bytes(encoded, dtype=np.float32, verbose=False)
+        self.assertTrue(np.all(data == decoded))
+
+    @unittest.expectedFailure
+    def test_neats_codec(self) -> None:
+        self._test_codec(encoding.NeatsCodec)
+
+        # can't encode float64 (as of now)
+        data = np.array(np.arange(17), dtype=np.float64)
+        encoded = encoding.NeatsCodec.tobytes(data, 0.1, verbose=False)
+        self.assertTrue(encoded is None)
+
+        # can't encode empty data
+        data = np.array([])
+        encoded = encoding.NeatsCodec.tobytes(data, 0.1, verbose=False)
+        self.assertTrue(encoded is None)
+
+    def test_intify_codec(self) -> None:
+        self._test_codec(encoding.IntifyCodec)
 
     def test_encode_coordinates(self) -> None:
         data = np.arange(7 * 8 * 2, dtype=np.float32)

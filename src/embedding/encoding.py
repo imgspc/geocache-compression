@@ -117,7 +117,47 @@ class NeatsCodec(Codec):
                 return np.fromfile(binfile.name, dtype=dtype)
 
 
-_codecs = [RawCodec, NeatsCodec]
+class IntifyCodec(Codec):
+    @classmethod
+    def tobytes(
+        cls, data: np.ndarray, quality: float, verbose: bool
+    ) -> Optional[bytes]:
+        """
+        We store the data as fixed-point integer multiples of the quality bound,
+        difference-coded, using the smallest int that will fit all the
+        differences.
+        """
+        if len(data) == 0:
+            return None
+        # boost to 64 bits for intermediate calculations; we squeeze it later
+        # so it doesn't cost us anything.
+        rounded = np.round(data.astype(np.float64) / quality).astype(np.int64)
+        diffcoded = np.ediff1d(rounded, to_begin=rounded[0])
+
+        # min_scalar_type is tricky to use with signed values; rewrite the
+        # differences with a bias so it's all unsigned values.
+        base = np.min(diffcoded)
+        positive = diffcoded - base
+        largest = np.max(positive)
+        t = np.min_scalar_type(largest)
+
+        diff_bytes = positive.astype(t).tobytes()
+        tchar = t.char[0].encode()
+        return struct.pack("<qfc", base, quality, tchar) + diff_bytes
+
+    @classmethod
+    def from_bytes(
+        cls, payload: bytes, dtype: Union[type, DTypeLike], verbose: bool
+    ) -> np.ndarray:
+        base, quality, tchar = struct.unpack_from("<qfc", payload)
+        offset = struct.calcsize("<qfc")
+        diff_values = np.frombuffer(payload, offset=offset, dtype=np.dtype(tchar))
+        diffcoded = np.array(diff_values, dtype=np.int64) + base
+        rounded = np.cumsum(diffcoded)
+        return (rounded * np.float64(quality)).astype(dtype)
+
+
+_codecs = [RawCodec, IntifyCodec]
 
 
 class ApproximatedStream:

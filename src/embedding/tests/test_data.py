@@ -19,4 +19,6 @@ def complex_data(nreps: int = 1000, nsamples: int = 30) -> np.ndarray:
     origin = np.array([10, 0, -10])
 
     # there's obviously a nicer way to write this but it's escaping me
-    return np.array([origin + sample * velocities for sample in range(nsamples)])
+    return np.array(
+        [origin + sample * velocities for sample in range(nsamples)], dtype=np.float32
+    )
