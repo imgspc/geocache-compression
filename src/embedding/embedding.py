@@ -730,13 +730,19 @@ class PCAConfigurationSpaceEmbedding(AbstractPCAEmbedding):
     @classmethod
     def flatten(cls, data: np.ndarray) -> np.ndarray:
         nsamples, nverts, ndim = data.shape
-        return np.reshape(data, (nsamples, nverts * ndim))
+        # Vt will be serialized row by row.
+        # Make sure each row is the X coords, then the Y coords, etc to
+        # minimize larger diffs.
+        data_by_coord = data.transpose(0, 2, 1)
+        return data_by_coord.reshape((nsamples, nverts * ndim))
 
     def unflatten(self, data: np.ndarray) -> np.ndarray:
-        n, m = data.shape
+        nsamples, m = data.shape
         if m % self.ndim != 0:
             raise ValueError(f"{m} columns not divisible into {self.ndim} dimensions")
-        return np.reshape(data, (n, m // self.ndim, self.ndim))
+        nverts = m // self.ndim
+        data_by_coord = data.reshape((nsamples, self.ndim, nverts))
+        return data_by_coord.transpose(0, 2, 1)
 
 
 def best_embedding(
