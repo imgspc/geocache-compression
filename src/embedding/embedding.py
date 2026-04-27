@@ -479,6 +479,10 @@ class FlatCenteredPCA:
         # n+m+1 values: n from U, m from Vt, and 1 from s.
         # Count how much error we sustain if we drop 'count' values.
         def error(count: int) -> float:
+            if count == len(s):
+                # Drop everything? Mprime is the zero matrix, so M-Mprime = M.
+                return np.max(np.fabs(M))
+
             if count == 0:
                 Uprime = U
                 sprime = s
@@ -518,13 +522,19 @@ class FlatCenteredPCA:
             U = np.array(U[:, 0:-count], copy=True)
             s = np.array(s[0:-count], copy=True)
             Vt = np.array(Vt[0:-count, :], copy=True)
-        WVt = np.diag(s) @ Vt
+
+        # We'll store the two matrices; shove s into the smaller one, so
+        # diff-coding will do a better job on the bigger matrix.
+        if np.prod(Vt.shape) < np.prod(U.shape):
+            Vt = np.diag(s) @ Vt
+        else:
+            U = U * s
 
         # Compute how much we can round off.
         existing_roundoff = error(count)
         if existing_roundoff >= quality:
             existing_roundoff = 0  # TODO: we shouldn't be here, just give up
-        epsilon = cls._epsilon(U, WVt, quality - existing_roundoff)
+        epsilon = cls._epsilon(U, Vt, quality - existing_roundoff)
 
         if verbose:
             if count > 0:
@@ -534,7 +544,7 @@ class FlatCenteredPCA:
             else:
                 print(f"PCA unable to reduce dimensions")
 
-        embedding = cls(n, m, len(s), WVt, U, epsilon)
+        embedding = cls(n, m, len(s), Vt, U, epsilon)
         return embedding
 
     @classmethod
