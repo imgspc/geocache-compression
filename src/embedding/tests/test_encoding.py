@@ -23,6 +23,25 @@ class EncodingTestCase(unittest.TestCase):
             self.assertTrue(os.path.exists(fname))
         self.assertFalse(os.path.exists(fname))
 
+    def test_packbits(self) -> None:
+        # pack 32 values in [0,15] in 4 bits, which should save half the space
+        values = np.array([np.arange(16), np.flip(np.arange(16))])
+        packed = encoding.packmultibits(values, 4)
+        self.assertEqual(packed.dtype, np.uint8)
+        self.assertEqual(len(packed), np.prod(values.shape) // 2)
+        unpacked = encoding.unpackmultibits(packed, 4, int(np.prod(values.shape)))
+        reshaped = unpacked.reshape(values.shape)
+        self.assertTrue(np.all(values == reshaped))
+
+        # pack 32 values in [0,7] in 3 bits, which should be 21 values per 64-bit
+        # so 2 words should be enough.
+        packed = encoding.packmultibits(values // 2, 3)
+        self.assertTrue(packed.dtype == np.uint64)
+        self.assertEqual(len(packed), 2)
+        unpacked = encoding.unpackmultibits(packed, 3, int(np.prod(values.shape)))
+        reshaped = unpacked.reshape(values.shape)
+        self.assertTrue(np.all(values // 2 == reshaped))
+
     def _test_codec(
         self, codec, data: Optional[np.ndarray] = None, quality: float = 0.1
     ) -> None:

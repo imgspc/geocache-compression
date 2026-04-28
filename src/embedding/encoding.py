@@ -413,3 +413,161 @@ def decode_coordinates(
         row_coords = np.array([stream.stream for stream in streams])
         data = row_coords.T.reshape(shape)
     return data, headers[-1].next_offset()
+
+
+def tiny_int_dtype(width: int) -> type:
+    if width <= 0 or width > 64:
+        raise ValueError("width {width} out of bounds (0,64]")
+    match width:
+        case 64:
+            return np.uint64
+        case 32:
+            return np.uint32
+        case 16:
+            return np.uint16
+        case 8:
+            return np.uint8
+        case 4:
+            return np.uint8
+        case 2:
+            return np.uint8
+        case 1:
+            return np.bool
+    return np.uint64
+
+
+def packmultibits(values: np.ndarray, width: int) -> np.ndarray:
+    """
+    Packs the elements of a width-bit-valued unsigned int array into bits in an
+    array of a native uint type.
+
+    Use unpackmultibits to round-trip the values.
+    """
+    if width < 0 or width > 64:
+        raise ValueError("width {width} out of bounds [0,64]")
+
+    # Flatten the array; the caller will provide the shape when decoding.
+    values = values.flatten()
+
+    maxvalue = (1 << width) - 1
+    if np.max(values) > maxvalue:
+        raise ValueError("max value {np.max(values)} exceeds {width} bits")
+
+    if width == 0:
+        return np.array([])
+    if width == 1:
+        return np.packbits(values)
+
+    t = tiny_int_dtype(width)
+    dtype = np.dtype(t)
+    values = values.astype(dtype)
+
+    # If we're in a native type, just changing the type was enough.
+    wordsize = 8 * dtype.itemsize
+    if wordsize == width:
+        return values
+
+    # Otherwise we break the values up into values_per_word cols; then shift
+    # each col so that when we OR the rows together, we have packed
+    # values_per_word values together into one 8-bit or 64-bit word.
+    values_per_word = wordsize // width
+
+    # reshape, padding so the length divides evenly
+    extravalues = len(values) % values_per_word
+    if extravalues != 0:
+        numpad = values_per_word - extravalues
+        padded = np.pad(values, (0, numpad))
+    else:
+        padded = values
+    nwords = len(padded) // values_per_word
+    reshaped = padded.reshape((nwords, values_per_word))
+
+    # shift each col so the bits don't overlap
+    shifts = width * np.arange(values_per_word, dtype=dtype)
+    shifted = reshaped << shifts
+
+    # OR the rows (which is the same as summing since the bits don't overlap)
+    # For some reason, numpy upcasts here, so we need to clobber it back down.
+    orred = shifted.sum(axis=1).astype(dtype)
+    return orred
+
+
+def unpackmultibits(words: np.ndarray, width: int, count: int) -> np.ndarray:
+    """
+    Perform almost the inverse of packbits: take packed bits and convert back
+    to an flat array of unsigned values of the narrowest possible type.
+
+    The original shape and type are lost.
+    """
+    if width == 0:
+        return np.zeros(count, dtype=np.uint8)
+
+    if width == 1:
+        return np.unpackbits(words, count=count)
+
+    dtype = words.dtype
+    assert dtype == np.dtype(tiny_int_dtype(width))
+    wordsize = 8 * dtype.itemsize
+    if wordsize == width:
+        # Native size; no packing needed.
+        return words.astype(dtype)
+
+    # Break the words up into columns of values of width bits.
+    # Then flatten the columns to get the padded output.
+    # Finally, trim off the pad values.
+    values_per_word = wordsize // width
+
+    # Make a column from each value so we can shift and mask them.
+    columns = np.tile(words, (values_per_word, 1)).T
+
+    # Shift each column.
+    shifts = width * np.arange(values_per_word, dtype=dtype)
+    shifted = columns >> shifts
+
+    # Mask all the values to truncate high bits.
+    maxvalue = (1 << width) - 1
+    masked = shifted & maxvalue
+
+    # Flatten the columns.
+    padded = masked.flatten()
+
+    # Trim the padding if any.
+    if len(padded) == count:
+        return padded
+    else:
+        return np.array(padded[:count], copy=True)
+
+
+def encode_tiny_ints(values: np.ndarray, width: int) -> bytes:
+    """
+    Encode an array of unsigned ints that each fit in some small number of bits.
+    """
+    return packmultibits(values, width).tobytes()
+
+
+def decode_tiny_ints(
+    b: bytes, offset: int, shape: tuple[int, ...], width: int
+) -> tuple[np.ndarray, int]:
+    """
+    Decode tiny ints encoded by encode_tiny_ints.
+
+    Returns an array of the appropriate shape, and the new offset. The original
+    dtype is lost, we output the narrowest dtype that fits the width.
+    """
+    if width < 0 or width > 64:
+        raise ValueError("width {width} out of bounds [0,64]")
+    if width == 0:
+        return np.zeros(shape, dtype=np.uint8), offset
+
+    t = tiny_int_dtype(width)
+    dtype = np.dtype(t)
+    wordsize = 8 * dtype.itemsize
+    values_per_word = wordsize // width
+
+    count = int(np.prod(shape))
+    padded_count = ((count - 1) // values_per_word) + 1
+
+    packed = np.frombuffer(b[offset : offset + padded_count], dtype=dtype)
+    offset += padded_count * packed.dtype.itemsize
+    unpacked = unpackmultibits(packed, width, count)
+    return unpacked.reshape(shape), offset
