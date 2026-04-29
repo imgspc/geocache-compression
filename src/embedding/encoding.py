@@ -415,25 +415,21 @@ def decode_coordinates(
     return data, headers[-1].next_offset()
 
 
-def tiny_int_dtype(width: int) -> type:
-    if width <= 0 or width > 64:
-        raise ValueError("width {width} out of bounds (0,64]")
-    match width:
-        case 64:
-            return np.uint64
-        case 32:
-            return np.uint32
-        case 16:
-            return np.uint16
-        case 8:
-            return np.uint8
-        case 4:
-            return np.uint8
-        case 2:
-            return np.uint8
-        case 1:
-            return np.bool
-    return np.uint64
+def tiny_int_dtype(width: int) -> np.dtype:
+    # 0 and 1 bit width are special, they don't come through here
+    if width <= 1 or width > 64:
+        raise ValueError("width {width} out of bounds [2,64]")
+
+    def waste_per_64bits(dtype):
+        wordsize = dtype.itemsize * 8
+        if wordsize < width:
+            return 64
+        nwords = 64 // wordsize
+        waste_per_word = wordsize % width
+        return waste_per_word * nwords
+
+    dtypes = map(np.dtype, (np.uint8, np.uint16, np.uint32, np.uint64))
+    return min(dtypes, key=waste_per_64bits)
 
 
 def packmultibits(values: np.ndarray, width: int) -> np.ndarray:
@@ -458,8 +454,7 @@ def packmultibits(values: np.ndarray, width: int) -> np.ndarray:
     if width == 1:
         return np.packbits(values)
 
-    t = tiny_int_dtype(width)
-    dtype = np.dtype(t)
+    dtype = tiny_int_dtype(width)
     values = values.astype(dtype)
 
     # If we're in a native type, just changing the type was enough.
@@ -469,7 +464,7 @@ def packmultibits(values: np.ndarray, width: int) -> np.ndarray:
 
     # Otherwise we break the values up into values_per_word cols; then shift
     # each col so that when we OR the rows together, we have packed
-    # values_per_word values together into one 8-bit or 64-bit word.
+    # values_per_word values together into each word without overlap.
     values_per_word = wordsize // width
 
     # reshape, padding so the length divides evenly
@@ -487,8 +482,8 @@ def packmultibits(values: np.ndarray, width: int) -> np.ndarray:
     shifted = reshaped << shifts
 
     # OR the rows (which is the same as summing since the bits don't overlap)
-    # For some reason, numpy upcasts here, so we need to clobber it back down.
-    orred = shifted.sum(axis=1).astype(dtype)
+    # Prevent numpy from upcasting to uint64 here; we know there's no carry.
+    orred = shifted.sum(axis=1, dtype=dtype)
     return orred
 
 
