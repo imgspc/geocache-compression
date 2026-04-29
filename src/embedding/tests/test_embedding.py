@@ -3,6 +3,8 @@ import unittest
 import numpy as np
 
 from embedding.embedding import (
+    center_data,
+    compute_colrows_needed,
     Embedding,
     PCAConfigurationSpaceEmbedding,
     RawEmbedding,
@@ -23,6 +25,12 @@ class EmbeddingTestCase(unittest.TestCase):
         ],
         dtype=np.float32,
     )
+
+    def test_center_data(self) -> None:
+        data = EmbeddingTestCase.simple_data
+        centroid = np.sum(data, axis=0) / len(data)
+        c, cbytes = center_data(data, quality=0.1, verbose=False)
+        self.assertTrue(np.allclose(centroid, c, rtol=0, atol=0.11))
 
     def _basic_embedding_tests(
         self, cls, quality: float, data: Optional[np.ndarray] = None

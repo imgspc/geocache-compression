@@ -4,9 +4,16 @@ from abc import ABC, abstractmethod
 import numpy as np
 import struct
 import math
+from scipy.spatial.transform import Rotation
 
 from .util import pack_small_uint, unpack_small_uint, pack_dtype, unpack_dtype
-from .encoding import ApproximatedStream, encode_coordinates, decode_coordinates
+from .encoding import (
+    ApproximatedStream,
+    encode_coordinates,
+    decode_coordinates,
+    encode_tiny_ints,
+    decode_tiny_ints,
+)
 
 from typing import Union, Optional
 from numpy.typing import DTypeLike
@@ -434,6 +441,7 @@ class FlatCenteredPCA:
 
         assert len(maxA) == len(maxB)
         assert A.dtype == B.dtype
+        assert d > 0
 
         eps = (0.5 * (np.sqrt(4 * q / d + np.square(maxAB)) - maxAB)).astype(A.dtype)
         return eps
@@ -475,63 +483,27 @@ class FlatCenteredPCA:
         # We don't want the full matrices, they'd be huge.
         U, s, Vt = np.linalg.svd(M, full_matrices=False)
 
-        # We want to drop as many dimensions as possible since each one dropped removes
-        # n+m+1 values: n from U, m from Vt, and 1 from s.
-        # Count how much error we sustain if we drop 'count' values.
-        def error(count: int) -> float:
-            if count == len(s):
-                # Drop everything? Mprime is the zero matrix, so M-Mprime = M.
-                return np.max(np.fabs(M))
-
-            if count == 0:
-                Uprime = U
-                sprime = s
-                Vtprime = Vt
-            else:
-                Uprime = U[:, 0:-count]
-                sprime = s[0:-count]
-                Vtprime = Vt[0:-count, :]
-            # * to multiply by a diagonal matrix as a vector; @ for matmul
-            Mprime = Uprime * sprime @ Vtprime
-            return np.max(np.fabs(M - Mprime))
-
-        # Error increases monotonically with the more dimensions we drop, so
-        # binary search indices 0..len(s) to find the most we can drop while
-        # keeping error < quality.
-        # Binary search, adapted from bisect.bisect_right; lo ends up at the
-        # smallest number of dimensions to drop that produces too much error.
-        lo = 0
-        hi = len(s)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if quality < error(mid):
-                hi = mid
-            else:
-                lo = mid + 1
-        count = lo - 1
-        if count < 0:
-            if verbose:
-                print(
-                    f"PCA creates too much roundoff error even without dimensionality reduction"
-                )
-            count = 0
-            # TODO: return None
-
-        # Make copies to release the truncated bits.
-        if count > 0:
-            U = np.array(U[:, 0:-count], copy=True)
-            s = np.array(s[0:-count], copy=True)
-            Vt = np.array(Vt[0:-count, :], copy=True)
-
-        # We'll store the two matrices; shove s into the smaller one, so
-        # diff-coding will do a better job on the bigger matrix.
+        # Shove the s vector into the smaller of U or Vt.
         if np.prod(Vt.shape) < np.prod(U.shape):
             Vt = np.diag(s) @ Vt
         else:
             U = U * s
 
+        count = compute_colrows_needed(M, U, Vt, quality)
+        if count == -1:
+            print(f"unhandled: error {np.max(np.fabs(M - U @ Vt))} exceeds {quality}")
+            count = len(s)
+
+        # Make copies to release the truncated bits.
+        if count < len(s):
+            # TODO
+            if count == 0:
+                count = 1
+            U = np.array(U[:, :count], copy=True)
+            Vt = np.array(Vt[:count, :], copy=True)
+
         # Compute how much we can round off.
-        existing_roundoff = error(count)
+        existing_roundoff = compute_truncation_error(M, U, Vt, count)
         if existing_roundoff >= quality:
             existing_roundoff = 0  # TODO: we shouldn't be here, just give up
         epsilon = cls._epsilon(U, Vt, quality - existing_roundoff)
@@ -539,12 +511,12 @@ class FlatCenteredPCA:
         if verbose:
             if count > 0:
                 print(
-                    f"PCA reduced {count} dimensions from {M.shape} to {U.shape} and {Vt.shape} with error {existing_roundoff}"
+                    f"PCA reduced {len(s)-count} dimensions from {M.shape} to {U.shape} and {Vt.shape} with error {existing_roundoff}"
                 )
             else:
                 print(f"PCA unable to reduce dimensions")
 
-        embedding = cls(n, m, len(s), Vt, U, epsilon)
+        embedding = cls(n, m, count, Vt, U, epsilon)
         return embedding
 
     @classmethod
@@ -570,6 +542,72 @@ class FlatCenteredPCA:
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
         return decode_coordinates(b, offset, (self.n, self.k), self.WVt.dtype)
+
+
+def center_data(
+    data: np.ndarray, quality: float, verbose: bool = False
+) -> tuple[np.ndarray, bytes]:
+    """
+    Find the centroids of the data.
+
+    We compute the centroids, round them off, and return the rounded centroids
+    along with the centroids encoded as bytes.
+    """
+    nsamples, nverts, ndim = data.shape
+
+    # Center the data.
+    c = np.sum(data, axis=0) / nsamples
+    cbytes = encode_coordinates(c, quality)
+    shape = (nverts, ndim)
+    cprime, _ = decode_coordinates(
+        cbytes,
+        offset=0,
+        shape=shape,
+        dtype=data.dtype,
+        verbose=verbose,
+    )
+    return (cprime, cbytes)
+
+
+def compute_truncation_error(
+    M: np.ndarray, A: np.ndarray, B: np.ndarray, count: int
+) -> float:
+    """
+    Return the error in recreating M from A@B if we truncate A to count
+    columns, and B to count rows.
+
+    count == 0 means we are recreating M from the all-zero matrix.
+
+    Costs a matrix multiplication, so if M is (n,m)
+    the cost is O(n m count).
+    """
+    if count == 0:
+        return np.max(np.fabs(M))
+    Aprime = A[:, :count]
+    Bprime = B[:count, :]
+    Mprime = Aprime @ Bprime
+    return np.max(np.fabs(Mprime - M))
+
+
+def compute_colrows_needed(
+    M: np.ndarray, A: np.ndarray, B: np.ndarray, epsilon: float
+) -> int:
+    """
+    Given M = A@B, return how many columns of A and rows of B we need to keep
+    to arrive at ||M' - M||_inf < epsilon.
+
+    If A and B are from the output of SVD then we are keeping the fewest
+    possible number of values.
+
+    If even the full-dimensional input has too much error, return -1.
+    """
+    _, cols = A.shape
+
+    # Find the smallest number of columns that works.
+    for i in range(cols):
+        if compute_truncation_error(M, A, B, i) <= epsilon:
+            return i
+    return -1
 
 
 class AbstractPCAEmbedding(Embedding):
@@ -631,16 +669,7 @@ class AbstractPCAEmbedding(Embedding):
         # Center the data. We compute the centroid in full precision, then
         # we round-trip it through encoding and use that for calculations to
         # avoid letting roundoff accumulate.
-        c = np.sum(data, axis=0) / nsamples
-        cbytes = encode_coordinates(c, quality)
-        shape = (nverts, ndim)
-        c, _ = decode_coordinates(
-            cbytes,
-            offset=0,
-            shape=shape,
-            dtype=data.dtype,
-            verbose=verbose,
-        )
+        c, cbytes = center_data(data, quality, verbose)
         M = data - c
 
         # Flatten M and get its PCA
@@ -743,6 +772,213 @@ class PCAConfigurationSpaceEmbedding(AbstractPCAEmbedding):
         nverts = m // self.ndim
         data_by_coord = data.reshape((nsamples, self.ndim, nverts))
         return data_by_coord.transpose(0, 2, 1)
+
+
+class PCAGeometrySpaceEmbedding(Embedding):
+    """
+    Embedding class where we do PCA in geometry space.
+
+    We convert each vertex individually, computing the axes along which it's
+    moving the most. The Vt matrix is therefore a rotoreflection; we can
+    convert it into a rotation by negating the last column if needed.
+
+    Given it's a rotation we can write it as 3 euler angles rather than a 3x3
+    matrix.
+    """
+
+    def __init__(
+        self,
+        nsamples: int,
+        nverts: int,
+        ndim: int,
+        c: np.ndarray,
+        cbytes: Optional[bytes],
+        counts: np.ndarray,
+        Vt: Union[list[np.ndarray], np.ndarray],
+        U: Optional[list[np.ndarray]],
+        quality: Optional[float],
+    ):
+        self.nsamples = nsamples
+        self.nverts = nverts
+        self.ndim = ndim
+        self.c = c
+        self.cbytes = cbytes
+        self.counts = counts
+        self.Vt = Vt
+        self.U = U
+        self.quality = quality
+        self._verify()
+
+    def _verify(self):
+        if self.ndim == 3:
+            # in dimension 3, Vt *must* be an array of shape nverts, 3
+            assert isinstance(self.Vt, np.ndarray)
+            assert self.Vt.shape == (self.nverts, 3)
+        else:
+            # in other dimensions, Vt and U must be lists of arrays
+            assert isinstance(self.Vt, list)
+        assert np.all(counts <= self.ndim)
+        assert np.all(counts >= 0)
+        assert len(self.Vt) == self.nverts
+        if self.U is not None:
+            assert len(self.U) == self.nverts
+            assert np.all(counts == [U[i].shape[1]])
+
+    @classmethod
+    def from_data(
+        cls, data: Domain, quality: float, verbose: bool = False
+    ) -> Embedding:
+        """ """
+        nsamples, nverts, ndim = data.shape
+
+        c, cbytes = center_data(data, quality, verbose)
+        M = data - c
+
+        # transpose so that svd is getting a bunch of nsamples x ndim matrices,
+        # and returns a U, s, and Vt matrix for each vertex.
+        byvertex = M.transpose(1, 0, 2)
+        U, s, Vt = np.linalg.svd(byvertex, full_matrices=False)
+
+        # In 3d we can save the Vt matrix as a 3-vector since it's a rotation.
+        # In other dimensions, we act like configuration-space, dropping rows
+        # and cols.
+        if ndim != 3:
+            U = U * s
+            rotations: Optional[np.ndarray] = None
+        else:
+            # Vt is an array of 3x3 matrices, each a rotoflection. We can trivially convert
+            # them into rotations: just negate the last row.
+            #
+            # We should also negate the last col of U to match, but we're about
+            # to recompute that one anyway.
+            reflections = np.linalg.det(Vt) < 0
+
+            Vs_to_flip = Vt[reflections, :, :]
+            negated_V_rows = -Vs_to_flip[:, -1, :]
+            Vt[reflections, -1, :] = negated_V_rows
+
+            # Convert the rotation matrices into axis-angle notation.
+            # That only takes 3 values: a unit vector *times* the angle.
+            rotations = np.ndarray(
+                [Rotation.from_matrix(Vti).as_rotvec() for Vti in Vt]
+            )
+
+            # Recompute U to limit propagation of numerical error:
+            # M = UVt ==> MV = U because V = Vt^{-1} since it's a rotation
+            rotations_decoded, _ = decode_coordinates(
+                encode_coordinates(rotations, quality),
+                offset=0,
+                shape=rotations.shape,
+                dtype=rotations.dtype,
+            )
+            Vt = np.ndarray(
+                [Rotation.from_rotvec(r).as_matrix() for r in rotations_decoded]
+            )
+            U = byvertex @ Vt.transpose(0, 2, 1)
+
+        # Truncate each U for each vertex separately:
+        counts = np.ndarray(
+            [
+                compute_colrows_needed(byvertex[i], U[i], Vt[i], quality)
+                for i in range(nverts)
+            ]
+        )
+        truncated_U = [U[i, :, :count] for i, count in enumerate(counts)]
+
+        if ndim == 3:
+            assert rotations is not None
+            return cls(
+                nsamples,
+                nverts,
+                ndim,
+                c,
+                cbytes,
+                counts,
+                rotations,
+                truncated_U,
+                quality,
+            )
+        else:
+            assert rotations is None
+            truncated_Vt = [Vt[i, :count, :] for i, count in enumerate(counts)]
+            return cls(
+                nsamples,
+                nverts,
+                ndim,
+                c,
+                cbytes,
+                counts,
+                truncated_Vt,
+                truncated_U,
+                quality,
+            )
+
+    @classmethod
+    def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
+        nsamples, offset = unpack_small_uint(b, offset)
+        nverts, offset = unpack_small_uint(b, offset)
+        ndim, offset = unpack_small_uint(b, offset)
+        t, offset = unpack_dtype(b, offset)
+        c, offset = decode_coordinates(b, offset, (nverts, ndim), dtype=t)
+        # Read the counts, which have values [0,ndim].
+        width = math.ceil(math.log2(ndim + 1))
+        counts, offset = decode_tiny_ints(b, offset, (nverts,), width)
+
+        if ndim == 3:
+            rotations, offset = decode_coordinates(b, offset, (nverts, ndim), dtype=t)
+            rot = rotations
+        else:
+            # Pad out each jagged row with zeroes.
+            Vt: list[np.ndarray] = []
+            for i in range(nverts):
+                Vi, offset = decode_coordinates(b, offset, (ndim, counts[i]), dtype=t)
+                padded: np.ndarray = np.zeros((ndim, ndim), dtype=t)
+                padded[:, : counts[i]] = Vi
+                Vt.append(padded.T)
+            rotations = np.ndarray(Vt)
+
+        return (
+            cls(nsamples, nverts, ndim, c, None, counts, rot, U=None, quality=None),
+            offset,
+        )
+
+    def tobytes(self) -> bytes:
+        if self.cbytes is None:
+            raise ValueError("trying to re-encode decoded data")
+        assert self.quality is not None
+
+        width = math.ceil(math.log2(self.ndim + 1))
+
+        if self.ndim == 3:
+            # TODO: what's the quality bound we should impose?
+            assert isinstance(self.Vt, np.ndarray)
+            rotbytes = [encode_coordinates(self.Vt, self.quality)]
+        else:
+            rotbytes = [encode_coordinates(Vti.T, self.quality) for Vti in self.Vt]
+
+        return b"".join(
+            [
+                pack_small_uint(self.nsamples),
+                pack_small_uint(self.nverts),
+                pack_small_uint(self.ndim),
+                pack_dtype(self.c.dtype),
+                encode_coordinates(self.c, self.quality),
+                encode_tiny_ints(self.counts, width),
+            ]
+            + rotbytes
+        )
+
+    def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
+        U: list[np.ndarray] = []
+        t = self.c.dtype
+        for i in range(self.nverts):
+            Ui, offset = decode_coordinates(
+                b, offset, (self.nsamples, self.counts[i]), dtype=t
+            )
+            padded = np.zeros((self.nsamples, self.ndim), dtype=t)
+            padded[:, : self.counts[i]] = Ui
+            U.append(padded)
+        return np.ndarray(U), offset
 
 
 def best_embedding(
