@@ -341,6 +341,9 @@ def encode_coordinates(
     ndim denoting a separate quality per coordinate.
     """
     ndim = data.shape[-1]
+    count = int(np.prod(data.shape[:-1]))
+    if ndim == 0 or count == 0:
+        return b""
 
     if not isinstance(quality, np.ndarray):
         quality = np.full(ndim, quality)
@@ -349,7 +352,6 @@ def encode_coordinates(
         return ApproximatedStream(data, quality[0]).tobytes_dataonly(len(data))
 
     # flatten the greater dimensions
-    count = int(np.prod(data.shape[:-1]))
     flattened = data.reshape(count, ndim)
 
     def write_coordinate(d: int) -> bytes:
@@ -383,6 +385,10 @@ def decode_coordinates(
     else:
         ndim = shape[-1]
         count = np.prod(shape[:-1])
+
+    # 0-length storage is actually pretty common
+    if count == 0 or ndim == 0:
+        return np.array([], dtype=dtype), offset
 
     headers: list[ApproximatedStream.Header] = []
     for d in range(ndim):
