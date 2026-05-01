@@ -8,7 +8,7 @@ def complex_data(nreps: int = 1000, nsamples: int = 30) -> np.ndarray:
     """
     # We have three movement vectors, and one origin.
     # We create nreps particles going in each direction at variable
-    # speed in (0..1) based on their index, for nsamples timesteps.
+    # speed in [0..1) based on their index, for nsamples timesteps.
     base_vectors = np.array([[1, 1, 1], [0.5, 0.5, 1], [-1, 1, -1]])
     vectors = np.tile(base_vectors, (nreps, 1))
     nverts = len(vectors)
