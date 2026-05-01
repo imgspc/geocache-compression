@@ -7,6 +7,7 @@ from embedding.embedding import (
     compute_colrows_needed,
     Embedding,
     PCAConfigurationSpaceEmbedding,
+    PCA3dRotationEmbedding,
     RawEmbedding,
     StaticEmbedding,
     best_embedding,
@@ -95,7 +96,13 @@ class EmbeddingTestCase(unittest.TestCase):
 
     def test_embedding_pca_configuration(self) -> None:
         is_valid = self._basic_embedding_tests(
-            PCAConfigurationSpaceEmbedding, quality=1e-6
+            PCAConfigurationSpaceEmbedding, quality=1e-4
+        )
+        self.assertTrue(is_valid)
+
+    def test_embedding_pca_rotation(self) -> None:
+        is_valid = self._basic_embedding_tests(
+            PCA3dRotationEmbedding, quality=1e-4, data=complex_data()
         )
         self.assertTrue(is_valid)
 

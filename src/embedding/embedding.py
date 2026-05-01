@@ -774,63 +774,61 @@ class PCAConfigurationSpaceEmbedding(AbstractPCAEmbedding):
         return data_by_coord.transpose(0, 2, 1)
 
 
-class PCAGeometrySpaceEmbedding(Embedding):
+class PCA3dRotationEmbedding(Embedding):
     """
-    Embedding class where we do PCA in geometry space.
+    Embedding class where we do PCA in geometry space, in 3d.
 
-    We convert each vertex individually, computing the axes along which it's
-    moving the most. The Vt matrix is therefore a rotoreflection; we can
-    convert it into a rotation by negating the last column if needed.
+    PCA produces a 3x3 rotation matrix. We convert it to an axis-angle
+    representation so we store only 3-vectors each rather than 3x3 matrices.
 
-    Given it's a rotation we can write it as 3 euler angles rather than a 3x3
-    matrix.
+    Not valid in other dimensions. Analogies exist in other dimensions but
+    we don't have data to care about those.
     """
 
     def __init__(
         self,
-        nsamples: int,
-        nverts: int,
-        ndim: int,
         c: np.ndarray,
-        cbytes: Optional[bytes],
-        counts: np.ndarray,
-        Vt: Union[list[np.ndarray], np.ndarray],
-        U: Optional[list[np.ndarray]],
-        quality: Optional[float],
+        rotation: Rotation,
+        cbytes: Optional[bytes] = None,
+        rbytes: Optional[bytes] = None,
+        quality: Optional[float] = None,
+        data: Optional[np.ndarray] = None,
     ):
-        self.nsamples = nsamples
-        self.nverts = nverts
-        self.ndim = ndim
         self.c = c
+        self.rotation = rotation
         self.cbytes = cbytes
-        self.counts = counts
-        self.Vt = Vt
-        self.U = U
+        self.rbytes = rbytes
         self.quality = quality
-        self._verify()
+        self.data = data
 
-    def _verify(self):
-        if self.ndim == 3:
-            # in dimension 3, Vt *must* be an array of shape nverts, 3
-            assert isinstance(self.Vt, np.ndarray)
-            assert self.Vt.shape == (self.nverts, 3)
-        else:
-            # in other dimensions, Vt and U must be lists of arrays
-            assert isinstance(self.Vt, list)
-        assert np.all(counts <= self.ndim)
-        assert np.all(counts >= 0)
-        assert len(self.Vt) == self.nverts
-        if self.U is not None:
-            assert len(self.U) == self.nverts
-            assert np.all(counts == [U[i].shape[1]])
+    @classmethod
+    def is_valid(cls, data: Domain, quality: float) -> bool:
+        # SVD will give us a 3x3 rotation matrix per vertex if we have exactly
+        # 3d data and at least 3 samples.
+        nsamples, nverts, ndim = data.shape
+        return ndim == 3 and nsamples >= 3
+
+    @property
+    def nverts(self) -> int:
+        return self.c.shape[0]
+
+    @property
+    def ndim(self) -> int:
+        return 3
+
+    @property
+    def dtype(self):
+        return self.c.dtype
 
     @classmethod
     def from_data(
         cls, data: Domain, quality: float, verbose: bool = False
     ) -> Embedding:
         """ """
+        assert cls.is_valid(data, quality)
         nsamples, nverts, ndim = data.shape
 
+        dtype = data.dtype
         c, cbytes = center_data(data, quality, verbose)
         M = data - c
 
@@ -839,146 +837,191 @@ class PCAGeometrySpaceEmbedding(Embedding):
         byvertex = M.transpose(1, 0, 2)
         U, s, Vt = np.linalg.svd(byvertex, full_matrices=False)
 
-        # In 3d we can save the Vt matrix as a 3-vector since it's a rotation.
-        # In other dimensions, we act like configuration-space, dropping rows
-        # and cols.
-        if ndim != 3:
-            U = U * s
-            rotations: Optional[np.ndarray] = None
-        else:
-            # Vt is an array of 3x3 matrices, each a rotoflection. We can trivially convert
-            # them into rotations: just negate the last row.
-            #
-            # We should also negate the last col of U to match, but we're about
-            # to recompute that one anyway.
-            reflections = np.linalg.det(Vt) < 0
+        # Vt is an array of 3x3 matrices, each a rotoflection. We can trivially
+        # convert them into rotations by negating the last row.
+        #
+        # We'd need to adjust U to match, but we'll throw it away and recompute
+        # it later anyway.
+        reflections = np.linalg.det(Vt) < 0
+        Vs_to_flip = Vt[reflections, :, :]
+        negated_V_rows = -Vs_to_flip[:, -1, :]
+        Vt[reflections, -1, :] = negated_V_rows
 
-            Vs_to_flip = Vt[reflections, :, :]
-            negated_V_rows = -Vs_to_flip[:, -1, :]
-            Vt[reflections, -1, :] = negated_V_rows
+        # Store it as a set of rotations.
+        rotations = Rotation.from_matrix(Vt)
 
-            # Convert the rotation matrices into axis-angle notation.
-            # That only takes 3 values: a unit vector *times* the angle.
-            rotations = np.ndarray(
-                [Rotation.from_matrix(Vti).as_rotvec() for Vti in Vt]
-            )
+        # Round-trip the rotations so we encode with what will be reconstructed.
+        rbytes = cls.tobytes_rotation(rotations, quality)
+        rotations, _ = cls.frombytes_rotation(rbytes, 0, nverts, dtype)
 
-            # Recompute U to limit propagation of numerical error:
-            # M = UVt ==> MV = U because V = Vt^{-1} since it's a rotation
-            rotations_decoded, _ = decode_coordinates(
-                encode_coordinates(rotations, quality),
-                offset=0,
-                shape=rotations.shape,
-                dtype=rotations.dtype,
-            )
-            Vt = np.ndarray(
-                [Rotation.from_rotvec(r).as_matrix() for r in rotations_decoded]
-            )
-            U = byvertex @ Vt.transpose(0, 2, 1)
-
-        # Truncate each U for each vertex separately:
-        counts = np.ndarray(
-            [
-                compute_colrows_needed(byvertex[i], U[i], Vt[i], quality)
-                for i in range(nverts)
-            ]
+        return cls(
+            c,
+            rotations,
+            cbytes=cbytes,
+            rbytes=rbytes,
+            quality=quality,
+            data=data,
         )
-        truncated_U = [U[i, :, :count] for i, count in enumerate(counts)]
 
-        if ndim == 3:
-            assert rotations is not None
-            return cls(
-                nsamples,
-                nverts,
-                ndim,
-                c,
-                cbytes,
-                counts,
-                rotations,
-                truncated_U,
-                quality,
+    def project(self, data: Domain) -> Reduced:
+        # From SVD:
+        #     M = UWVt
+        # We want to return UW. Simple:
+        #     UW = MVt^-1.
+        # In other words, apply the inverse rotation to the centered data.
+        # Transpose to (nverts, nsamples, ndim) from (nsamples, nverts, ndim)
+        nsamples, nverts, ndim = data.shape
+        if ndim != 3:
+            raise ValueError
+        if nverts != self.nverts:
+            raise ValueError
+
+        bysample = data - self.c
+        byvertex = bysample.transpose(1, 0, 2)
+
+        # Rotation converts to matrix form internally (as of scipy 1.17.1), so
+        # let's just go get it ourselves.
+        # Shape is nverts, ndim, ndim
+        rotation = self.rotation.as_matrix().transpose(0, 2, 1)
+
+        # Help numpy broadcast: make the shapes be
+        # byvertex - (nverts, nsamples, 1, ndim)
+        # invrotation - (nverts, 1, ndim, ndim)
+        # That way, we match up vertices, we apply the same rotation to each sample,
+        # and applying the rotation means multiplying a row by a rotation.
+        M = np.reshape(byvertex, (nverts, nsamples, 1, ndim))
+        V = np.reshape(rotation, (nverts, 1, ndim, ndim))
+
+        # multiply them to shape (nverts, nsamples, 1, ndim)
+        UW = M @ V
+
+        # drop the extra rank added for broadcasting rules
+        # also the roetation got done in float64, bring it back down if needed.
+        UW = np.reshape(UW, (nverts, nsamples, ndim)).astype(self.dtype)
+
+        return UW
+
+    def invert(self, data: Reduced) -> Domain:
+        nverts, nsamples, ndim = data.shape
+        if ndim != 3 or nverts != self.nverts:
+            raise ValueError(
+                f"expected ({self.nverts}, {nsamples}, {self.ndim}) got {data.shape}"
             )
-        else:
-            assert rotations is None
-            truncated_Vt = [Vt[i, :count, :] for i, count in enumerate(counts)]
-            return cls(
-                nsamples,
-                nverts,
-                ndim,
-                c,
-                cbytes,
-                counts,
-                truncated_Vt,
-                truncated_U,
-                quality,
-            )
+
+        # From SVD:
+        #     M = UWVt
+        # data is UW; Vt is the rotations. We need to add dimensions to guide broadcasting,
+        # and remove them later.
+        UW = np.reshape(data, (nverts, nsamples, 1, ndim))
+        Vt = self.rotation.as_matrix()
+        Vt = np.reshape(Vt, (nverts, 1, ndim, ndim))
+        M = UW @ Vt
+        M = np.reshape(M, (nverts, nsamples, ndim))
+
+        # Transpose to (nsamples, nverts, ndim) from (nverts, nsamples, ndim)
+        centered = M.transpose(1, 0, 2)
+
+        # Shift back to the original space.
+        return centered + self.c
+
+    @classmethod
+    def frombytes_rotation(
+        cls, b: bytes, offset: int, nverts: int, dtype: np.dtype
+    ) -> tuple[Rotation, int]:
+        rotvecs, offset = decode_coordinates(b, offset, (nverts, 3), dtype=dtype)
+        return Rotation.from_rotvec(rotvecs), offset
+
+    @classmethod
+    def tobytes_rotation(cls, rotations, quality) -> bytes:
+        # TODO: what quality bound should we use?
+        return encode_coordinates(rotations.as_rotvec(), quality)
 
     @classmethod
     def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
-        nsamples, offset = unpack_small_uint(b, offset)
         nverts, offset = unpack_small_uint(b, offset)
-        ndim, offset = unpack_small_uint(b, offset)
+        ndim = 3
         t, offset = unpack_dtype(b, offset)
-        c, offset = decode_coordinates(b, offset, (nverts, ndim), dtype=t)
-        # Read the counts, which have values [0,ndim].
-        width = math.ceil(math.log2(ndim + 1))
-        counts, offset = decode_tiny_ints(b, offset, (nverts,), width)
+        dtype = np.dtype(t)
+        c, offset = decode_coordinates(b, offset, (nverts, ndim), dtype=dtype)
+        rotations, offset = cls.frombytes_rotation(b, offset, nverts, dtype)
 
-        if ndim == 3:
-            rotations, offset = decode_coordinates(b, offset, (nverts, ndim), dtype=t)
-            rot = rotations
-        else:
-            # Pad out each jagged row with zeroes.
-            Vt: list[np.ndarray] = []
-            for i in range(nverts):
-                Vi, offset = decode_coordinates(b, offset, (ndim, counts[i]), dtype=t)
-                padded: np.ndarray = np.zeros((ndim, ndim), dtype=t)
-                padded[:, : counts[i]] = Vi
-                Vt.append(padded.T)
-            rotations = np.ndarray(Vt)
-
-        return (
-            cls(nsamples, nverts, ndim, c, None, counts, rot, U=None, quality=None),
-            offset,
-        )
+        return (cls(c, rotations), offset)
 
     def tobytes(self) -> bytes:
-        if self.cbytes is None:
+        if self.cbytes is None or self.rbytes is None or self.quality is None:
             raise ValueError("trying to re-encode decoded data")
-        assert self.quality is not None
-
-        width = math.ceil(math.log2(self.ndim + 1))
-
-        if self.ndim == 3:
-            # TODO: what's the quality bound we should impose?
-            assert isinstance(self.Vt, np.ndarray)
-            rotbytes = [encode_coordinates(self.Vt, self.quality)]
-        else:
-            rotbytes = [encode_coordinates(Vti.T, self.quality) for Vti in self.Vt]
 
         return b"".join(
             [
-                pack_small_uint(self.nsamples),
                 pack_small_uint(self.nverts),
-                pack_small_uint(self.ndim),
-                pack_dtype(self.c.dtype),
-                encode_coordinates(self.c, self.quality),
-                encode_tiny_ints(self.counts, width),
+                pack_dtype(self.dtype),
+                self.cbytes,
+                self.rbytes,
             ]
-            + rotbytes
         )
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
-        U: list[np.ndarray] = []
-        t = self.c.dtype
+        # Read the counts, which have values [0,3] so fit in 2 bits.
+        nsamples, offset = unpack_small_uint(b, offset)
+        counts, offset = decode_tiny_ints(b, offset, (self.nverts,), 2)
+
+        # Read U, which was stored jagged; return it padded back out.
+        U = np.zeros((self.nverts, nsamples, self.ndim))
         for i in range(self.nverts):
             Ui, offset = decode_coordinates(
-                b, offset, (self.nsamples, self.counts[i]), dtype=t
+                b, offset, (nsamples, counts[i]), dtype=self.dtype
             )
-            padded = np.zeros((self.nsamples, self.ndim), dtype=t)
-            padded[:, : self.counts[i]] = Ui
-            U.append(padded)
-        return np.ndarray(U), offset
+            U[i, :, : counts[i]] = Ui
+        return U, offset
+
+    def write_projection(self, projected: Reduced) -> bytes:
+        if self.quality is None or self.data is None:
+            raise ValueError
+        if projected.dtype != self.dtype:
+            raise ValueError
+        nverts, nsamples, ndim = projected.shape
+        if nverts != self.nverts or ndim != self.ndim:
+            raise ValueError
+
+        t = self.dtype
+
+        # errors[i,j] is the error of keeping i values for vertex j's
+        # representation in the rotated space. We store the 4th value as 0
+        # error as a hack to claim we can always finding a valid variant in
+        # the argmax later.
+        errors = np.zeros((5, self.nverts))
+        for n in range(ndim):
+            U = np.zeros(projected.shape)
+            U[:, :, :n] = projected[:, :, :n]
+            inverted = self.invert(U)
+            err_n = np.fabs(inverted - self.data)
+            # err_n has shape (nsamples, nverts, ndim)
+            # we want to have the max over all samples over all dimensions for
+            # each vertex. So transpose to have (nverts, nsamples, ndim),
+            # flatten the last two, and then max.
+            error_per_vertex = err_n.transpose((1, 0, 2))
+            error_per_vertex = error_per_vertex.reshape((nverts, nsamples * ndim))
+            errors[n, :] = np.max(error_per_vertex, axis=1)
+
+        # ok[i,j] means keeping i values for vertex j is sufficient
+        ok = errors <= self.quality
+        print(f"ok shape {ok.shape})")
+
+        # counts[j] is minimum count of values to keep for vertex j.
+        # if we exceed the error bound no matter what, the argmax will be 4;
+        # silently just replace that with a 3 instead.
+        counts = np.argmax(ok, axis=0)
+        counts = np.where(counts == 4, 3, counts)
+
+        # values are [0..3] so 2 bits is enough.
+        encoded_counts = encode_tiny_ints(counts, 2)
+
+        encoded_U = [
+            encode_coordinates(U[i, :, : counts[i]], self.quality)
+            for i in range(self.nverts)
+        ]
+
+        return b"".join([pack_small_uint(nsamples), encoded_counts, *encoded_U])
 
 
 def best_embedding(
