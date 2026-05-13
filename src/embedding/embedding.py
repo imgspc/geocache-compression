@@ -129,6 +129,9 @@ class _ClassMap:
         self._classmap[ID] = cls
         self._idmap[cls] = ID
 
+    def get_classes(self) -> list[type]:
+        return list(self._idmap.keys())
+
     def get_class(self, ID: int) -> type:
         return self._classmap[ID]
 
@@ -604,7 +607,8 @@ def compute_colrows_needed(
     _, cols = A.shape
 
     # Find the smallest number of columns that works.
-    for i in range(cols):
+    # Loop over choices from 0 to every column, hence the +1.
+    for i in range(cols + 1):
         if compute_truncation_error(M, A, B, i) <= epsilon:
             return i
     return -1
@@ -851,7 +855,12 @@ class PCA3dRotationEmbedding(Embedding):
         rotations = Rotation.from_matrix(Vt)
 
         # Round-trip the rotations so we encode with what will be reconstructed.
-        rbytes = cls.tobytes_rotation(rotations, quality)
+        # We need about 20x the quality for the rotation to be sufficiently accurate
+        # to avoid having too much error. Proof TBD but basically the error is about
+        # 14 eps from the rotation matrix, and about 6 eps to convert from
+        # axis-angle to matrix, plus we are giving quality/2 to UW,
+        # so set eps = quality/40.
+        rbytes = cls.tobytes_rotation(rotations, quality / 40, dtype)
         rotations, _ = cls.frombytes_rotation(rbytes, 0, nverts, dtype)
 
         return cls(
@@ -932,9 +941,9 @@ class PCA3dRotationEmbedding(Embedding):
         return Rotation.from_rotvec(rotvecs), offset
 
     @classmethod
-    def tobytes_rotation(cls, rotations, quality) -> bytes:
-        # TODO: what quality bound should we use?
-        return encode_coordinates(rotations.as_rotvec(), quality)
+    def tobytes_rotation(cls, rotations, epsilon, dtype: np.dtype) -> bytes:
+        rotvecs = rotations.as_rotvec().astype(dtype)
+        return encode_coordinates(rotvecs, epsilon)
 
     @classmethod
     def from_bytes(cls, b: bytes, offset: int = 0) -> tuple[Embedding, int]:
@@ -965,13 +974,22 @@ class PCA3dRotationEmbedding(Embedding):
         nsamples, offset = unpack_small_uint(b, offset)
         counts, offset = decode_tiny_ints(b, offset, (self.nverts,), 2)
 
-        # Read U, which was stored jagged; return it padded back out.
+        # Read U, which was stored as sparse columns.
         U = np.zeros((self.nverts, nsamples, self.ndim))
-        for i in range(self.nverts):
-            Ui, offset = decode_coordinates(
-                b, offset, (nsamples, counts[i]), dtype=self.dtype
+
+        def dense(j: int, offset: int) -> int:
+            mask = counts > j
+            nonzeros = np.sum(mask.astype(int))
+            if nonzeros == 0:
+                return offset
+            sparse, offset = decode_coordinates(
+                b, offset, (nonzeros, nsamples), dtype=self.dtype
             )
-            U[i, :, : counts[i]] = Ui
+            U[mask, :, j] = sparse
+            return offset
+
+        for j in range(self.ndim):
+            offset = dense(j, offset)
         return U, offset
 
     def write_projection(self, projected: Reduced) -> bytes:
@@ -983,14 +1001,16 @@ class PCA3dRotationEmbedding(Embedding):
         if nverts != self.nverts or ndim != self.ndim:
             raise ValueError
 
+        # we allow ourselves to eat up half the quality bound
+        epsilon = self.quality / 2
+
         t = self.dtype
 
         # errors[i,j] is the error of keeping i values for vertex j's
-        # representation in the rotated space. We store the 4th value as 0
-        # error as a hack to claim we can always finding a valid variant in
-        # the argmax later.
+        # representation in the rotated space. We can store 0, 1, 2, or 3.
+        # Hack: denote keeping 4 values as having zero error.
         errors = np.zeros((5, self.nverts))
-        for n in range(ndim):
+        for n in range(ndim + 1):
             U = np.zeros(projected.shape)
             U[:, :, :n] = projected[:, :, :n]
             inverted = self.invert(U)
@@ -1004,8 +1024,7 @@ class PCA3dRotationEmbedding(Embedding):
             errors[n, :] = np.max(error_per_vertex, axis=1)
 
         # ok[i,j] means keeping i values for vertex j is sufficient
-        ok = errors <= self.quality
-        print(f"ok shape {ok.shape})")
+        ok = errors <= epsilon
 
         # counts[j] is minimum count of values to keep for vertex j.
         # if we exceed the error bound no matter what, the argmax will be 4;
@@ -1016,21 +1035,30 @@ class PCA3dRotationEmbedding(Embedding):
         # values are [0..3] so 2 bits is enough.
         encoded_counts = encode_tiny_ints(counts, 2)
 
-        encoded_U = [
-            encode_coordinates(U[i, :, : counts[i]], self.quality)
-            for i in range(self.nverts)
-        ]
+        # Store columns of U sparsely; counts[i] > j tells us whether the
+        # value of U[j,i] is nonzero. I.e. count 0 means dimensions 0..2 are zero,
+        # count 2 means dimensions 0 and 1 have value but dimension 2 is zero.
+        def sparse(j):
+            mask = counts > j
+            sparse_col = U[mask, :, j]
+            coded = encode_coordinates(sparse_col, epsilon)
+            return coded
 
-        return b"".join([pack_small_uint(nsamples), encoded_counts, *encoded_U])
+        sparse_cols = [sparse(j) for j in range(self.ndim)]
+
+        return b"".join([pack_small_uint(nsamples), encoded_counts, *sparse_cols])
 
 
 def best_embedding(
     data: Domain,
     quality: float,
     verbose: bool = False,
-    candidates=[StaticEmbedding, PCAConfigurationSpaceEmbedding, RawEmbedding],
+    candidates: Optional[list[type[Embedding]]] = None,
 ) -> Embedding:
     nsamples, nverts, ndim = data.shape
+
+    if candidates is None:
+        candidates = _classmap.get_classes()
 
     embeddings = [
         candidate.from_data(data, quality, verbose)
@@ -1055,3 +1083,4 @@ def best_embedding(
 _classmap.register(1, RawEmbedding)
 _classmap.register(2, StaticEmbedding)
 _classmap.register(3, PCAConfigurationSpaceEmbedding)
+_classmap.register(4, PCA3dRotationEmbedding)
