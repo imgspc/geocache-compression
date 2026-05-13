@@ -348,13 +348,16 @@ def run_single_report(
     verbose: bool = False,
     **kwargs,
 ) -> metric.Report:
-    files = create_embedding(
-        header, quality=quality, embed_fn=embed_fn, cluster_fn=cluster_fn, **kwargs
-    )
-    size = sum(os.path.getsize(path) for path in files)
-    predata = read_binfile(header)
-    postdata = read_embedding(header, files)
-    r = metric.Report(predata, postdata, size)
+    try:
+        files = create_embedding(
+            header, quality=quality, embed_fn=embed_fn, cluster_fn=cluster_fn, **kwargs
+        )
+        size = sum(os.path.getsize(path) for path in files)
+        predata = read_binfile(header)
+        postdata = read_embedding(header, files)
+        r = metric.Report(predata, postdata, size)
+    except BaseException as e:
+        raise ValueError(f"Failure while running {header}") from e
     compression_ratio = 1 - r.compressed_size / r.original_size
     if verbose:
         print(f"{compression_ratio: 5.2%} | {r.original_size} | {header.path}")
