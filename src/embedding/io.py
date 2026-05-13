@@ -7,19 +7,19 @@ import os
 import struct
 import sys
 import re
-import concurrent.futures
 
 from typing import Any, Optional, Iterable, Union
 from numpy.typing import DTypeLike
 from embedding import embedding, clustering, metric
-from embedding.embedding import best_embedding
+from .embedding import best_embedding, Embedding
+from .util import make_thread_pool
 
 # Inputs:
 #       .json -- provides nsamples, type, size, extent for all properties
 #       .bin -- provides ndarray (nsamples, size, extent) and dtype=type; also, tells us which property to look for
 #
 
-_executor = concurrent.futures.ThreadPoolExecutor()
+_executor = make_thread_pool()
 
 
 class Header:
@@ -277,7 +277,7 @@ def create_embedding(
     assert len(clusters) == cover.nsubsets
 
     # In parallel, embed everything.
-    def do_embed(cluster) -> embedding.Embedding:
+    def do_embed(cluster) -> Embedding:
         return embed_fn(cluster, quality, verbose=verbose)
 
     embeddings = list(_executor.map(do_embed, clusters))
@@ -373,7 +373,7 @@ def run_all_reports(
     **kwargs,
 ) -> dict[str, metric.Report]:
     # run the files in parallel, in our own executor
-    executor = concurrent.futures.ThreadPoolExecutor()
+    executor = make_thread_pool()
 
     def runone(header):
         report = run_single_report(

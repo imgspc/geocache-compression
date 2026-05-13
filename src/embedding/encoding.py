@@ -5,7 +5,6 @@ import numpy as np
 import struct
 import subprocess
 import tempfile
-import concurrent.futures
 
 from abc import abstractmethod
 from typing import Optional, Union
@@ -17,6 +16,7 @@ from .util import (
     pack_dtype,
     unpack_dtype,
     float_to_hex,
+    make_thread_pool,
 )
 
 neats_dir = Path.home() / "projects/geocache-compression/install/bin"
@@ -24,7 +24,7 @@ neats_compress = neats_dir / "neats_lossy_compress"
 neats_decompress = neats_dir / "neats_lossy_decompress"
 
 # Set up a thread pool for encoding.
-_executor = concurrent.futures.ThreadPoolExecutor()
+_executor = make_thread_pool()
 
 
 def temp_filename():
@@ -192,6 +192,8 @@ class ApproximatedStream:
         """
         if self.epsilon is None:
             raise ValueError("unable to re-compress a stream")
+        if count is not None and count <= 0:
+            raise ValueError(f"count {count}")
 
         encodings = [
             codec.tobytes(self.stream, self.epsilon, verbose) for codec in _codecs
@@ -204,10 +206,10 @@ class ApproximatedStream:
         # The raw encoding is always valid.
         assert len(valid) >= 1
 
-        def key(ce: tuple[int, bytes]) -> int:
+        def streamlength(ce: tuple[int, bytes]) -> int:
             return len(ce[1])
 
-        best_index, data = min(valid, key=key)
+        best_index, data = min(valid, key=streamlength)
 
         # Encoding:
         # codec index (1 byte)
@@ -251,9 +253,13 @@ class ApproximatedStream:
 
         See from_bytes_dataonly_with_header.
         """
+        if count is not None and count <= 0:
+            raise ValueError(f"count {count}")
         start_offset = offset
         (codec_index,) = struct.unpack_from("B", b, offset=offset)
         offset += 1
+        if codec_index >= len(_codecs):
+            raise ValueError(f"read codec {codec_index} in stream with count {count}")
         if count is not None and _codecs[codec_index] == RawCodec:
             length = count * np.dtype(dtype).itemsize
         else:
@@ -270,7 +276,6 @@ class ApproximatedStream:
     @staticmethod
     def from_bytes_dataonly_with_header(
         dtype: Union[DTypeLike, type],
-        count: Optional[int],
         b: bytes,
         h: ApproximatedStream.Header,
         verbose: bool,
@@ -307,7 +312,7 @@ class ApproximatedStream:
         have the same count value (i.e. the same number, or both are None).
         """
         header = cls.read_dataonly_header(dtype, count, b, offset, verbose)
-        return cls.from_bytes_dataonly_with_header(dtype, count, b, header, verbose)
+        return cls.from_bytes_dataonly_with_header(dtype, b, header, verbose)
 
     def tobytes(self, verbose=False) -> bytes:
         return b"".join(
@@ -340,8 +345,14 @@ def encode_coordinates(
     Quality can be one value used for every coordinate, or a vector of length
     ndim denoting a separate quality per coordinate.
     """
-    ndim = data.shape[-1]
-    count = int(np.prod(data.shape[:-1]))
+    shape = data.shape
+    if len(shape) == 1:
+        ndim = 1
+        count = shape[0]
+    else:
+        ndim = shape[-1]
+        count = np.prod(shape[:-1])
+
     if ndim == 0 or count == 0:
         return b""
 
@@ -405,7 +416,7 @@ def decode_coordinates(
     # Decompress in parallel.
     def decompress(d: int) -> ApproximatedStream:
         stream, _ = ApproximatedStream.from_bytes_dataonly_with_header(
-            dtype, count, b, headers[d], verbose=verbose
+            dtype, b, headers[d], verbose=verbose
         )
         return stream
 

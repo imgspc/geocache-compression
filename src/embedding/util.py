@@ -3,8 +3,28 @@ from __future__ import annotations
 import bisect
 import numpy as np
 import struct
+import concurrent.futures
 
 from typing import Optional
+
+
+# For testing, use the LinearExecutor to make operation be single-threaded
+# and in sequential order. For production, switch to ThreadPoolExecutor.
+class LinearExecutor(concurrent.futures.Executor):
+    def __init__(self):
+        self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+    def submit(self, f, *args, **kwargs) -> concurrent.futures.Future:  # type: ignore
+        return self.pool.submit(f, *args, **kwargs)
+
+    def map(self, fn, *iterables, timeout=None, chunksize=1, buffersize=None):
+        for args in zip(*iterables):
+            yield self.submit(fn, *args).result()
+
+
+def make_thread_pool():
+    # return concurrent.futures.ThreadPoolExecutor()
+    return LinearExecutor()
 
 
 class SmallIntPackFmt:
