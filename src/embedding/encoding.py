@@ -131,6 +131,7 @@ class IntifyCodec(Codec):
             return None
         # boost to 64 bits for intermediate calculations; we squeeze it later
         # so it doesn't cost us anything.
+        count = int(np.prod(data.shape))
         rounded = np.round(data.astype(np.float64) / quality).astype(np.int64)
         diffcoded = np.ediff1d(rounded, to_begin=rounded[0])
 
@@ -139,19 +140,28 @@ class IntifyCodec(Codec):
         base = np.min(diffcoded)
         positive = diffcoded - base
         largest = np.max(positive)
-        t = np.min_scalar_type(largest)
-
-        diff_bytes = positive.astype(t).tobytes()
-        tchar = t.char[0].encode()
-        return struct.pack("<qfc", base, quality, tchar) + diff_bytes
+        if largest == 0:
+            width = 0
+        else:
+            width = math.floor(math.log2(largest)) + 1
+            assert largest < (1 << width)
+        diff_bytes = encode_tiny_ints(positive, width)
+        return (
+            struct.pack("<qfB", base, quality, width)
+            + pack_small_uint(count)
+            + diff_bytes
+        )
 
     @classmethod
     def from_bytes(
         cls, payload: bytes, dtype: Union[type, DTypeLike], verbose: bool
     ) -> np.ndarray:
-        base, quality, tchar = struct.unpack_from("<qfc", payload)
-        offset = struct.calcsize("<qfc")
-        diff_values = np.frombuffer(payload, offset=offset, dtype=np.dtype(tchar))
+        base, quality, width = struct.unpack_from("<qfB", payload)
+        offset = struct.calcsize("<qfB")
+        count, offset = unpack_small_uint(payload, offset)
+        diff_values, offset = decode_tiny_ints(
+            payload, offset=offset, width=width, shape=(count,)
+        )
         diffcoded = np.array(diff_values, dtype=np.int64) + base
         rounded = np.cumsum(diffcoded)
         return (rounded * np.float64(quality)).astype(dtype)
@@ -578,8 +588,13 @@ def decode_tiny_ints(
 
     count = int(np.prod(shape))
     padded_count = ((count - 1) // values_per_word) + 1
+    padded_len = padded_count * dtype.itemsize
+    if offset + padded_len > len(b):
+        raise ValueError(
+            "buffer of length {len(b)} overrun by {padded_count}-byte array starting at {offset}"
+        )
 
-    packed = np.frombuffer(b[offset : offset + padded_count], dtype=dtype)
-    offset += padded_count * packed.dtype.itemsize
+    packed = np.frombuffer(b[offset : offset + padded_len], dtype=dtype)
+    offset += padded_len
     unpacked = unpackmultibits(packed, width, count)
     return unpacked.reshape(shape), offset
