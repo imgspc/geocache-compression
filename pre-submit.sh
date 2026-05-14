@@ -18,7 +18,14 @@ python -m mypy src
 # Type-check jupyter
 find src -name .ipynb_checkpoints -prune -o -name \*.ipynb -print0 | xargs -0 python -m nbqa mypy
 
-if [ x"$1" == x ] ; then
-    cd src
+if [ x"$1" == x--notests ] ; then
+    exit 0
+fi
+
+cd src
+
+if [ x"$1" != x ] ; then
+    python -m unittest discover -v -s embedding/tests -k "$@"
+else
     python -m unittest discover -v -s embedding/tests
 fi
