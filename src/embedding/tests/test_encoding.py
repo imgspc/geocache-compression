@@ -119,8 +119,9 @@ class EncodingTestCase(unittest.TestCase):
 
         sparse_a_bytes = encoding.encode_sparse_matrix(A, counts, 0.25)
         decodedB, decodedCounts, offset = encoding.decode_sparse_matrix(
-            sparse_a_bytes, 0, nrows=10, dtype=np.float32
+            sparse_a_bytes, 0, nrows=10, dtype=A.dtype
         )
         self.assertEqual(offset, len(sparse_a_bytes))
         self.assertEqual(B.shape, decodedB.shape)
         self.assertTrue(np.allclose(B, decodedB, rtol=0, atol=0.25))
+        self.assertEqual(A.dtype, decodedB.dtype)

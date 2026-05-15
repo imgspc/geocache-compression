@@ -370,7 +370,7 @@ def encode_coordinates(
     if not isinstance(quality, np.ndarray):
         quality = np.full(ndim, quality)
 
-    if len(data.shape) == 1:
+    if ndim == 1:
         return ApproximatedStream(data, quality[0]).tobytes_dataonly(len(data))
 
     # flatten the greater dimensions
@@ -433,7 +433,7 @@ def decode_coordinates(
 
     streams = list(_executor.map(decompress, range(ndim)))
 
-    if len(shape) == 1:
+    if ndim == 1:
         data = streams[0].stream
     else:
         # if we're returning an array we need to make coordinates be columns,
@@ -446,7 +446,7 @@ def decode_coordinates(
 def encode_sparse_matrix(
     data: np.ndarray,
     counts: np.ndarray,
-    quality: Union[float, np.ndarray],
+    quality: Union[None, float, np.ndarray],
     verbose=False,
 ) -> bytes:
     """
@@ -458,9 +458,14 @@ def encode_sparse_matrix(
     Columns that are entirely zero are not encoded:
         decode_sparse_matrix(encode_sparse_matrix(...))
     may return fewer columns than passed in.
+
+    Quality may be None only if np.max(counts) == 0.
     """
     nrows, _ = data.shape
     ncols = np.max(counts)
+
+    if ncols == 0:
+        return struct.pack("B", 0)
 
     if not isinstance(quality, np.ndarray):
         quality = np.full(ncols, quality)
@@ -503,10 +508,17 @@ def decode_sparse_matrix(
         * the row counts
         * the offset after reading the data
     """
-
     # First read the counts.
     (width,) = struct.unpack_from("B", b, offset=offset)
     offset += 1
+
+    if width == 0:
+        return (
+            np.zeros((nrows, 0), dtype=dtype),
+            np.zeros((nrows,), dtype=np.uint8),
+            offset,
+        )
+
     row_counts, offset = decode_tiny_ints(b, offset, (nrows,), width)
     ncols = np.max(row_counts)
 
@@ -539,7 +551,7 @@ def decode_sparse_matrix(
     columns = list(_executor.map(decode, range(ncols)))
 
     # Desparsify
-    data = np.zeros((nrows, ncols))
+    data = np.zeros((nrows, ncols), dtype=dtype)
     for col in range(ncols):
         data[mask[:, col], col] = columns[col]
 
