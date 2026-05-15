@@ -1,5 +1,5 @@
 import unittest
-from embedding import encoding
+from embedding import encoding, util
 import numpy as np
 import os
 
@@ -111,3 +111,16 @@ class EncodingTestCase(unittest.TestCase):
         self.assertEqual(offset, len(encoded))
         self.assertEqual(decoded.shape, shape3)
         self.assertTrue(np.allclose(data, decoded, rtol=0, atol=0.1))
+
+    def test_encode_sparse(self) -> None:
+        A = np.arange(1, 101).reshape((10, 10)).astype(np.float32)
+        counts = np.arange(10) // 2
+        B = util.zero_jagged(A, counts)
+
+        sparse_a_bytes = encoding.encode_sparse_matrix(A, counts, 0.25)
+        decodedB, decodedCounts, offset = encoding.decode_sparse_matrix(
+            sparse_a_bytes, 0, nrows=10, dtype=np.float32
+        )
+        self.assertEqual(offset, len(sparse_a_bytes))
+        self.assertEqual(B.shape, decodedB.shape)
+        self.assertTrue(np.allclose(B, decodedB, rtol=0, atol=0.25))

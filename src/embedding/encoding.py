@@ -16,6 +16,7 @@ from .util import (
     pack_dtype,
     unpack_dtype,
     float_to_hex,
+    uint_width,
     make_thread_pool,
 )
 
@@ -440,6 +441,110 @@ def decode_coordinates(
         row_coords = np.array([stream.stream for stream in streams])
         data = row_coords.T.reshape(shape)
     return data, headers[-1].next_offset()
+
+
+def encode_sparse_matrix(
+    data: np.ndarray,
+    counts: np.ndarray,
+    quality: Union[float, np.ndarray],
+    verbose=False,
+) -> bytes:
+    """
+    Given a sparse matrix provided as:
+        a matrix of nrows x ncols
+        a vector of nrows counts (the number of columns to keep for each row)
+    Encode the sparse matrix.
+
+    Columns that are entirely zero are not encoded:
+        decode_sparse_matrix(encode_sparse_matrix(...))
+    may return fewer columns than passed in.
+    """
+    nrows, _ = data.shape
+    ncols = np.max(counts)
+
+    if not isinstance(quality, np.ndarray):
+        quality = np.full(ncols, quality)
+
+    # Write the values column by column, sparsely.
+    def write_column(col: int) -> bytes:
+        column = data[col < counts, col]
+        stream = ApproximatedStream(column, quality[col])
+        return stream.tobytes_dataonly(count=len(column), verbose=verbose)
+
+    bytestreams = _executor.map(write_column, range(ncols))
+
+    # Write the counts.
+    width = uint_width(counts)
+    cbytes = encode_tiny_ints(counts, width)
+
+    b = b"".join([struct.pack("B", width), cbytes, *bytestreams])
+    if verbose:
+        print(
+            f"stored {np.prod(data.shape)} values sparsely as {np.sum(counts)} in {len(b)} bytes"
+        )
+    return b
+
+
+def decode_sparse_matrix(
+    b: bytes,
+    offset: int,
+    nrows: int,
+    dtype: Union[DTypeLike, type],
+    verbose=False,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """
+    Decode a sparse matrix previously encoded by encode_sparse_matrix.
+
+    The number of columns returned is the minimum number needed to encode
+    the non-zero data.
+
+    Returns:
+        * the matrix in the given shape (must be a matrix)
+        * the row counts
+        * the offset after reading the data
+    """
+
+    # First read the counts.
+    (width,) = struct.unpack_from("B", b, offset=offset)
+    offset += 1
+    row_counts, offset = decode_tiny_ints(b, offset, (nrows,), width)
+    ncols = np.max(row_counts)
+
+    # Build up the mask of which values are actually stored.
+    mask = np.tile(np.arange(ncols), (1, nrows)) < row_counts[:, np.newaxis]
+
+    # Count how many values each *column* has (counts is by row).
+    col_counts = np.sum(mask, axis=0)
+
+    # Now read the headers for the columns.
+    headers: list[ApproximatedStream.Header] = []
+    for col in range(ncols):
+        if verbose:
+            print(
+                f"read column {col} starting at {offset} / {len(b)} ({len(b) - offset} remaining)"
+            )
+        header = ApproximatedStream.read_dataonly_header(
+            dtype=dtype, count=col_counts[col], b=b, offset=offset, verbose=verbose
+        )
+        headers.append(header)
+        offset = header.next_offset()
+
+    # Decode in parallel.
+    def decode(col: int) -> np.ndarray:
+        stream, _ = ApproximatedStream.from_bytes_dataonly_with_header(
+            dtype, b, headers[col], verbose=verbose
+        )
+        return stream.stream
+
+    columns = list(_executor.map(decode, range(ncols)))
+
+    # Desparsify
+    data = np.zeros((nrows, ncols))
+    for col in range(ncols):
+        data[mask[:, col], col] = columns[col]
+
+    # We're done!
+    return data, row_counts, offset
 
 
 def tiny_int_dtype(width: int) -> np.dtype:
