@@ -193,3 +193,17 @@ def float_to_hex(value: float) -> str:
     fbits = struct.pack("f", value)
     (unsigned,) = struct.unpack("I", fbits)
     return "0x" + hex(unsigned)
+
+
+def zero_jagged(A: np.ndarray, counts: np.ndarray) -> np.ndarray:
+    """
+    Given a jagged matrix specified as a dense matrix and row counts,
+    zero out all the entries past the limits of the jagged area and
+    remove columns that are all zero.
+    """
+    nrows, ncols = A.shape
+    index_matrix = np.tile(np.arange(ncols), (nrows, 1))
+    take_matrix = index_matrix < counts[:, np.newaxis]
+    Asparse = np.zeros((nrows, ncols), dtype=A.dtype)
+    Asparse[take_matrix] = A[take_matrix]
+    return Asparse[:, : np.max(counts)]

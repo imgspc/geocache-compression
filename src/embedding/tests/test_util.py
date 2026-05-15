@@ -20,3 +20,12 @@ class UtilTestCase(unittest.TestCase):
         roundtrip(16448, 3)
         roundtrip(1 << 32, 5)
         roundtrip(1 << 60, 9)
+
+    def test_jagged(self) -> None:
+        A = np.arange(1, 101).reshape((10, 10))
+        B = util.zero_jagged(A, np.arange(10) // 2)
+        self.assertEqual(B.shape[0], 10)
+        self.assertEqual(B.shape[1], 4)
+        nonzeros = np.count_nonzero(B, axis=1)
+        for i in range(10):
+            self.assertEqual(nonzeros[i], i // 2)
