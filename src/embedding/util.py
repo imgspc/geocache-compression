@@ -195,6 +195,25 @@ def float_to_hex(value: float) -> str:
     return "0x" + hex(unsigned)
 
 
+def uint_width(data: np.ndarray) -> int:
+    """
+    Given an array of unsigned int, return the bit width that will fit all the values.
+    """
+    if not np.issubdtype(data.dtype, np.integer):
+        raise ValueError(f"must be an integer type not {data.dtype}")
+    smol = np.min(data)
+    if smol < 0:
+        raise ValueError(f"negative values {smol} not supported")
+    largest = np.max(data)
+
+    # if this is slow, bithacks https://graphics.stanford.edu/~seander/bithacks.html#IntegerLog
+    log2 = -1
+    while largest > 0:
+        largest = largest // 2
+        log2 += 1
+    return log2 + 1
+
+
 def zero_jagged(A: np.ndarray, counts: np.ndarray) -> np.ndarray:
     """
     Given a jagged matrix specified as a dense matrix and row counts,

@@ -21,6 +21,14 @@ class UtilTestCase(unittest.TestCase):
         roundtrip(1 << 32, 5)
         roundtrip(1 << 60, 9)
 
+    def test_uint_width(self) -> None:
+        self.assertEqual(util.uint_width(np.array([0, 0, 0])), 0)
+        self.assertEqual(util.uint_width(np.arange(2)), 1)
+        self.assertEqual(util.uint_width(np.arange(64)), 6)
+        self.assertEqual(util.uint_width(np.arange(65)), 7)
+        self.assertEqual(util.uint_width(np.array([1 << 31])), 32)
+        self.assertEqual(util.uint_width(np.array([1 << 60])), 61)
+
     def test_jagged(self) -> None:
         A = np.arange(1, 101).reshape((10, 10))
         B = util.zero_jagged(A, np.arange(10) // 2)
