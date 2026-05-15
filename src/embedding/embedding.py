@@ -6,11 +6,19 @@ import struct
 import math
 from scipy.spatial.transform import Rotation
 
-from .util import pack_small_uint, unpack_small_uint, pack_dtype, unpack_dtype
+from .util import (
+    pack_small_uint,
+    unpack_small_uint,
+    pack_dtype,
+    unpack_dtype,
+    zero_jagged,
+)
 from .encoding import (
     ApproximatedStream,
     encode_coordinates,
     decode_coordinates,
+    encode_sparse_matrix,
+    decode_sparse_matrix,
     encode_tiny_ints,
     decode_tiny_ints,
 )
@@ -370,9 +378,10 @@ class FlatCenteredPCA:
         self,
         n: int,
         m: int,
-        k: int,
-        WVt: np.ndarray,
+        V: np.ndarray,
+        V_counts: np.ndarray,
         U: Optional[np.ndarray],
+        U_counts: Optional[np.ndarray],
         quality: Optional[np.ndarray],
     ):
         """
@@ -381,10 +390,15 @@ class FlatCenteredPCA:
         """
         self.n = n
         self.m = m
-        self.k = k
-        self.WVt = WVt
+        self.V = V
+        self.V_counts = V_counts
         self.U = U
+        self.U_counts = U_counts
         self.quality = quality
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.V.dtype
 
     @classmethod
     def is_valid(cls, data: Domain, quality: float) -> bool:
@@ -405,7 +419,7 @@ class FlatCenteredPCA:
         return self.U
 
     def invert(self, data: Reduced) -> Domain:
-        return data @ self.WVt
+        return data @ self.V.T
 
     def tobytes(self) -> bytes:
         """
@@ -414,14 +428,14 @@ class FlatCenteredPCA:
         The U array is not serialized, so calling `project` after deserializing
         will not give the identical result due to roundoff.
         """
-        assert self.quality is not None
+        # quality can only be none if we have no data to encode
+        assert self.quality is not None or np.max(self.V_counts) == 0
         return b"".join(
             (
                 pack_small_uint(self.n),
                 pack_small_uint(self.m),
-                pack_small_uint(self.k),
-                pack_dtype(self.WVt.dtype),
-                encode_coordinates(self.WVt.T, self.quality),
+                pack_dtype(self.dtype),
+                encode_sparse_matrix(self.V, self.V_counts, self.quality),
             )
         )
 
@@ -492,34 +506,43 @@ class FlatCenteredPCA:
         else:
             U = U * s
 
-        count = compute_colrows_needed(M, U, Vt, quality)
-        if count == -1:
-            print(f"unhandled: error {np.max(np.fabs(M - U @ Vt))} exceeds {quality}")
-            count = len(s)
+        # We will store U and V as sparse matrices, rounding to zero any
+        # values that we don't need in order to keep the quality bound.
+        # Keep U and Vt compatible in shape for now.
+        C = compute_colrows_needed(M, U, Vt, quality)
+        U_counts = np.max(C, axis=1)
+        V_counts = np.max(C, axis=0)
+        U = zero_jagged(U, U_counts)
+        V = zero_jagged(Vt.T, V_counts)
+        Vt = V.T
+        assert U.shape[0] == n
+        assert V.shape[0] == m
+        assert U.shape[1] == V.shape[1]
 
-        # Make copies to release the truncated bits.
-        if count < len(s):
-            # TODO
-            if count == 0:
-                count = 1
-            U = np.array(U[:, :count], copy=True)
-            Vt = np.array(Vt[:count, :], copy=True)
-
-        # Compute how much we can round off.
-        existing_roundoff = compute_truncation_error(M, U, Vt, count)
-        if existing_roundoff >= quality:
-            existing_roundoff = 0  # TODO: we shouldn't be here, just give up
-        epsilon = cls._epsilon(U, Vt, quality - existing_roundoff)
+        # Compute how much we can still round off.
+        existing_roundoff = np.max(np.fabs(M - U @ Vt))
+        if np.max(V_counts) == 0:
+            # If we rounded U and V down to nothing, we don't have
+            # a quality bound to evaluate.
+            epsilon = None
+        else:
+            if existing_roundoff >= quality:
+                existing_roundoff = 0  # TODO: we shouldn't be here, just give up
+            epsilon = cls._epsilon(U, Vt, quality - existing_roundoff)
 
         if verbose:
-            if count > 0:
+            fullsize = np.prod(M.shape)
+            sparsesize = np.sum(U_counts) + np.sum(V_counts)
+            if sparsesize < fullsize:
                 print(
-                    f"PCA reduced {len(s)-count} dimensions from {M.shape} to {U.shape} and {Vt.shape} with error {existing_roundoff}"
+                    f"PCA reduced values from {fullsize} to {sparsesize} ({np.sum(U_counts)} + {np.sum(V_counts)}) with error {existing_roundoff}"
                 )
             else:
-                print(f"PCA unable to reduce dimensions")
+                print(
+                    f"PCA unable to reduce value count: from {fullsize} to {sparsesize}"
+                )
 
-        embedding = cls(n, m, count, Vt, U, epsilon)
+        embedding = cls(n, m, V, V_counts, U, U_counts, epsilon)
         return embedding
 
     @classmethod
@@ -530,21 +553,19 @@ class FlatCenteredPCA:
         """
         n, offset = unpack_small_uint(b, offset)
         m, offset = unpack_small_uint(b, offset)
-        k, offset = unpack_small_uint(b, offset)
         t, offset = unpack_dtype(b, offset)
-        # we stored WVt transposed, so the shape is (m,k) not (k,m)
-        WV, offset = decode_coordinates(b, offset, dtype=t, shape=(m, k))
-        WVt = WV.T
+        V, V_counts, offset = decode_sparse_matrix(b, offset, m, dtype=t)
 
-        return (cls(n, m, k, WVt, U=None, quality=None), offset)
+        return (cls(n, m, V, V_counts, U=None, U_counts=None, quality=None), offset)
 
     def write_projection(self, U: np.ndarray) -> bytes:
-        if self.quality is None:
+        if self.U is None or self.U_counts is None:
             raise ValueError("can't re-encode")
-        return encode_coordinates(U, self.quality)
+        return encode_sparse_matrix(self.U, self.U_counts, self.quality)
 
     def read_projection(self, b: bytes, offset: int = 0) -> tuple[Reduced, int]:
-        return decode_coordinates(b, offset, (self.n, self.k), self.WVt.dtype)
+        U, U_counts, offset = decode_sparse_matrix(b, offset, self.n, self.dtype)
+        return U, offset
 
 
 def center_data(
@@ -572,46 +593,58 @@ def center_data(
     return (cprime, cbytes)
 
 
-def compute_truncation_error(
-    M: np.ndarray, A: np.ndarray, B: np.ndarray, count: int
-) -> float:
-    """
-    Return the error in recreating M from A@B if we truncate A to count
-    columns, and B to count rows.
-
-    count == 0 means we are recreating M from the all-zero matrix.
-
-    Costs a matrix multiplication, so if M is (n,m)
-    the cost is O(n m count).
-    """
-    if count == 0:
-        return np.max(np.fabs(M))
-    Aprime = A[:, :count]
-    Bprime = B[:count, :]
-    Mprime = Aprime @ Bprime
-    return np.max(np.fabs(Mprime - M))
-
-
 def compute_colrows_needed(
     M: np.ndarray, A: np.ndarray, B: np.ndarray, epsilon: float
-) -> int:
+) -> np.ndarray:
     """
     Given M = A@B, return how many columns of A and rows of B we need to keep
     to arrive at ||M' - M||_inf < epsilon.
 
-    If A and B are from the output of SVD then we are keeping the fewest
-    possible number of values.
+    M is given to avoid counting roundoff already present in A @ B.
 
-    If even the full-dimensional input has too much error, return -1.
+    Returns an integer matrix C of the same dimensions as M.
+
+    C_ij is the number of columns of A / rows of B we need for entry M_ij to
+    have low error.
+
+    You can round A_ik to zero if C_ij < k for all j:
+        np.max(C, axis=1)
+    You can round B_kj to zero if C_ij < k for all i:
+        np.max(C, axis=0)
     """
-    _, cols = A.shape
+    nrows, maxk = A.shape
+    _, ncols = B.shape
+    if _ != maxk:
+        raise ValueError("shapes {A.shape} and {B.shape} not compatible")
 
-    # Find the smallest number of columns that works.
-    # Loop over choices from 0 to every column, hence the +1.
-    for i in range(cols + 1):
-        if compute_truncation_error(M, A, B, i) <= epsilon:
-            return i
-    return -1
+    nk = maxk + 1
+
+    # Compute the error of truncating to (nrows, k) @ (k, ncols) for all k
+    # errors[i,j,k] is the error in M_ij after rounding to k values in the dot
+    # product.
+    #
+    # Leave errors[i,j,nk] = 0 so it'll always come up as OK, simplifying the code.
+    errors = np.zeros((nrows, ncols, nk + 1))
+    for k in range(nk):
+        Ak = A[:, :k]
+        Bk = B[:k, :]
+        Mk = Ak @ Bk
+        errors[:, :, k] = np.fabs(Mk - M)
+
+    # Compute which error values are ok and which are too high.
+    # ok[i,j,k] is true if keeping k values is good enough for M_ij.
+    ok = errors <= epsilon
+
+    # C[i,j] is the minimum number of values to keep that is good enough
+    # for M_ij.
+    C = np.argmax(ok, axis=2)
+
+    # if C[i,j] exceeds nk then we have too much error in that component no
+    # matter what.  TODO: we should do something about that other than silently
+    # ignoring it.
+    C = np.where(C > nk, nk, C)
+
+    return C
 
 
 class AbstractPCAEmbedding(Embedding):
@@ -707,7 +740,7 @@ class AbstractPCAEmbedding(Embedding):
         """
         Convert the embedding to a bytes object for serialization.
         """
-        assert self.c.dtype == self.pca.WVt.dtype
+        assert self.c.dtype == self.pca.dtype
         return b"".join(
             (
                 self.pca.tobytes(),
@@ -724,8 +757,7 @@ class AbstractPCAEmbedding(Embedding):
         """
         pca, offset = FlatCenteredPCA.from_bytes(b, offset)
         m = pca.m
-        t = pca.WVt.dtype
-        tsize = t.itemsize
+        dtype = pca.dtype
 
         ndim, offset = unpack_small_uint(b, offset)
         if m % ndim != 0:
@@ -733,7 +765,7 @@ class AbstractPCAEmbedding(Embedding):
         nverts = m // ndim
         cstart = offset
         shape = (nverts, ndim)
-        c, cend = decode_coordinates(b, offset, shape=shape, dtype=t, verbose=False)
+        c, cend = decode_coordinates(b, offset, shape=shape, dtype=dtype, verbose=False)
         offset = cend
 
         return (cls(pca, c, b[cstart:cend]), offset)

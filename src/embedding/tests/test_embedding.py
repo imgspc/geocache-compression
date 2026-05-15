@@ -27,6 +27,37 @@ class EmbeddingTestCase(unittest.TestCase):
         dtype=np.float32,
     )
 
+    def test_colrows(self) -> None:
+        A = np.array([[0, 1, 2], [1, 1e-6, 2e-6], [2, 3, 1e-7], [0.1, 0.2, 0]])
+        B = np.ones((3, 7))
+        C = compute_colrows_needed(A @ B, A, B, 0.5)
+        A_counts = np.max(C, axis=1)
+        B_counts = np.max(C, axis=0)
+        self.assertEqual(C[0, 0], 3)
+        self.assertEqual(A_counts[0], 3)
+        self.assertEqual(A_counts[1], 1)
+        self.assertEqual(A_counts[2], 2)
+        self.assertEqual(A_counts[3], 0)
+        self.assertTrue(np.all(B_counts == 3))
+
+        C = compute_colrows_needed(A @ B, A, B, 0.01)
+        A_counts = np.max(C, axis=1)
+        B_counts = np.max(C, axis=0)
+        self.assertEqual(A_counts[0], 3)
+        self.assertEqual(A_counts[1], 1)
+        self.assertEqual(A_counts[2], 2)
+        self.assertEqual(A_counts[3], 2)
+        self.assertTrue(np.all(B_counts == 3))
+
+        C = compute_colrows_needed(A @ B, A, B, 2.0001)
+        A_counts = np.max(C, axis=1)
+        B_counts = np.max(C, axis=0)
+        self.assertEqual(A_counts[0], 2)
+        self.assertEqual(A_counts[1], 0)
+        self.assertEqual(A_counts[2], 2)
+        self.assertEqual(A_counts[3], 0)
+        self.assertTrue(np.all(B_counts == 2))
+
     def test_center_data(self) -> None:
         data = EmbeddingTestCase.simple_data
         centroid = np.sum(data, axis=0) / len(data)
