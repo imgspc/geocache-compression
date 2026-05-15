@@ -560,9 +560,8 @@ def decode_sparse_matrix(
 
 
 def tiny_int_dtype(width: int) -> np.dtype:
-    # 0 and 1 bit width are special, they don't come through here
-    if width <= 1 or width > 64:
-        raise ValueError("width {width} out of bounds [2,64]")
+    if width < 1 or width > 64:
+        raise ValueError(f"width {width} out of bounds [2,64]")
 
     def waste_per_64bits(dtype):
         wordsize = dtype.itemsize * 8
