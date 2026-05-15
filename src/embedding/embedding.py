@@ -630,6 +630,9 @@ def compute_colrows_needed(
         Bk = B[:k, :]
         Mk = Ak @ Bk
         errors[:, :, k] = np.fabs(Mk - M)
+        # bail once we can chop off all further values
+        if np.max(errors[:, :, k]) <= epsilon:
+            break
 
     # Compute which error values are ok and which are too high.
     # ok[i,j,k] is true if keeping k values is good enough for M_ij.
